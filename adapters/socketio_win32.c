@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <limits.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -289,44 +290,84 @@ int socketio_open(CONCRETE_IO_HANDLE socket_io, ON_IO_OPEN_COMPLETE on_io_open_c
         }
         else
         {
-            socket_io_instance->socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-            if (socket_io_instance->socket == INVALID_SOCKET)
+            char portString[16];
+            ADDRINFO addrHint = { 0 };
+            ADDRINFO* addrInfo = NULL;
+            int addrResult;
+
+            addrHint.ai_family = AF_UNSPEC;
+            addrHint.ai_socktype = SOCK_STREAM;
+            addrHint.ai_protocol = 0;
+            sprintf(portString, "%d", socket_io_instance->port);
+            LogInfo("Starting DNS lookup for %s:%d", hostname, socket_io_instance->port);
+            addrResult = getaddrinfo(socket_io_instance->hostname, portString, &addrHint, &addrInfo);
+            if (addrResult != 0)
             {
-                open_result_detailed.code = WSAGetLastError();
-                LogError("Failure: socket create failure %d for %s.", open_result_detailed.code, hostname);
+                open_result_detailed.code = addrResult;
+                LogError("Failure: getaddrinfo failure %d (%s) for host %s.", open_result_detailed.code, gai_strerrorA(open_result_detailed.code), hostname);
+                result = __FAILURE__;
+            }
+            else if (addrInfo == NULL)
+            {
+                open_result_detailed.code = WSAHOST_NOT_FOUND;
+                LogError("Failure: getaddrinfo returned no addresses for host %s.", hostname);
                 result = __FAILURE__;
             }
             else
             {
-                char portString[16];
-                ADDRINFO addrHint = { 0 };
-                ADDRINFO* addrInfo = NULL;
-
-                addrHint.ai_family = AF_INET;
-                addrHint.ai_socktype = SOCK_STREAM;
-                addrHint.ai_protocol = 0;
-                sprintf(portString, "%d", socket_io_instance->port);
-                LogInfo("Starting DNS lookup for %s:%d", hostname, socket_io_instance->port);
-                int addrResult = getaddrinfo(socket_io_instance->hostname, portString, &addrHint, &addrInfo);
-                if (addrResult != 0)
+                if (addrInfo->ai_addr == NULL)
                 {
-                    open_result_detailed.code = addrResult;
-                    LogError("Failure: getaddrinfo failure %d (%s) for host %s.", open_result_detailed.code, gai_strerrorA(open_result_detailed.code), hostname);
-                    (void)closesocket(socket_io_instance->socket);
-                    socket_io_instance->socket = INVALID_SOCKET;
+                    open_result_detailed.code = WSAEINVAL;
+                    LogError("Failure: getaddrinfo returned a NULL address for host %s.", hostname);
+                    result = __FAILURE__;
+                }
+                else if ((addrInfo->ai_family != AF_INET) && (addrInfo->ai_family != AF_INET6))
+                {
+                    open_result_detailed.code = WSAEAFNOSUPPORT;
+                    LogError("Failure: getaddrinfo returned unsupported address family %d for host %s.", addrInfo->ai_family, hostname);
+                    result = __FAILURE__;
+                }
+                else if (((addrInfo->ai_family == AF_INET) && (addrInfo->ai_addrlen < sizeof(struct sockaddr_in))) ||
+                    ((addrInfo->ai_family == AF_INET6) && (addrInfo->ai_addrlen < sizeof(struct sockaddr_in6))))
+                {
+                    size_t minimum_address_length = (addrInfo->ai_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
+                    open_result_detailed.code = WSAEINVAL;
+                    LogError("Failure: resolved address length %llu is less than required length %llu for host %s.", (unsigned long long)addrInfo->ai_addrlen, (unsigned long long)minimum_address_length, hostname);
+                    result = __FAILURE__;
+                }
+                else if (addrInfo->ai_addrlen > (size_t)INT_MAX)
+                {
+                    open_result_detailed.code = WSAEINVAL;
+                    LogError("Failure: resolved address length %llu is too large for connect for host %s.", (unsigned long long)addrInfo->ai_addrlen, hostname);
+                    result = __FAILURE__;
+                }
+                else if (addrInfo->ai_addr->sa_family != addrInfo->ai_family)
+                {
+                    open_result_detailed.code = WSAEINVAL;
+                    LogError("Failure: resolved address family %u does not match addrinfo family %d for host %s.", (unsigned int)addrInfo->ai_addr->sa_family, addrInfo->ai_family, hostname);
                     result = __FAILURE__;
                 }
                 else
                 {
-                    u_long iMode = 1;
+                    int address_length = (int)addrInfo->ai_addrlen;
 
                     {
                         char resolved_ip[INET6_ADDRSTRLEN] = { 0 };
+                        const void* resolved_address = NULL;
                         const char* resolved_ip_str = NULL;
-                        if (addrInfo != NULL && addrInfo->ai_family == AF_INET && addrInfo->ai_addr != NULL)
+
+                        if ((addrInfo->ai_family == AF_INET) && (addrInfo->ai_addr != NULL) && (addrInfo->ai_addrlen >= sizeof(struct sockaddr_in)))
                         {
-                            struct sockaddr_in* sin = (struct sockaddr_in*)addrInfo->ai_addr;
-                            resolved_ip_str = InetNtopA(AF_INET, &sin->sin_addr, resolved_ip, sizeof(resolved_ip));
+                            resolved_address = &((struct sockaddr_in*)addrInfo->ai_addr)->sin_addr;
+                        }
+                        else if ((addrInfo->ai_family == AF_INET6) && (addrInfo->ai_addr != NULL) && (addrInfo->ai_addrlen >= sizeof(struct sockaddr_in6)))
+                        {
+                            resolved_address = &((struct sockaddr_in6*)addrInfo->ai_addr)->sin6_addr;
+                        }
+
+                        if (resolved_address != NULL)
+                        {
+                            resolved_ip_str = InetNtopA(addrInfo->ai_family, resolved_address, resolved_ip, sizeof(resolved_ip));
                         }
 
                         if (resolved_ip_str != NULL)
@@ -338,38 +379,51 @@ int socketio_open(CONCRETE_IO_HANDLE socket_io, ON_IO_OPEN_COMPLETE on_io_open_c
                             LogInfo("DNS resolved successfully, connecting to %s:%d", hostname, socket_io_instance->port);
                         }
                     }
-                    if (connect(socket_io_instance->socket, addrInfo->ai_addr, (int)addrInfo->ai_addrlen) != 0)
+
+                    socket_io_instance->socket = socket(addrInfo->ai_family, addrInfo->ai_socktype, addrInfo->ai_protocol);
+                    if (socket_io_instance->socket == INVALID_SOCKET)
                     {
                         open_result_detailed.code = WSAGetLastError();
-                        LogError("Failure: connect to %s:%d failed with error %d.", hostname, socket_io_instance->port, open_result_detailed.code);
-                        (void)closesocket(socket_io_instance->socket);
-                        socket_io_instance->socket = INVALID_SOCKET;
-                        result = __FAILURE__;
-                    }
-                    else if (ioctlsocket(socket_io_instance->socket, FIONBIO, &iMode) != 0)
-                    {
-                        open_result_detailed.code = WSAGetLastError();
-                        LogError("Failure: ioctlsocket failure %d for %s:%d.", open_result_detailed.code, hostname, socket_io_instance->port);
-                        (void)closesocket(socket_io_instance->socket);
-                        socket_io_instance->socket = INVALID_SOCKET;
+                        LogError("Failure: socket create failure %d for %s.", open_result_detailed.code, hostname);
                         result = __FAILURE__;
                     }
                     else
                     {
-                        LogInfo("TCP connection to %s:%d established successfully.", hostname, socket_io_instance->port);
-                        socket_io_instance->on_bytes_received = on_bytes_received;
-                        socket_io_instance->on_bytes_received_context = on_bytes_received_context;
+                        u_long iMode = 1;
 
-                        socket_io_instance->on_io_error = on_io_error;
-                        socket_io_instance->on_io_error_context = on_io_error_context;
+                        if (connect(socket_io_instance->socket, addrInfo->ai_addr, address_length) != 0)
+                        {
+                            open_result_detailed.code = WSAGetLastError();
+                            LogError("Failure: connect to %s:%d failed with error %d.", hostname, socket_io_instance->port, open_result_detailed.code);
+                            (void)closesocket(socket_io_instance->socket);
+                            socket_io_instance->socket = INVALID_SOCKET;
+                            result = __FAILURE__;
+                        }
+                        else if (ioctlsocket(socket_io_instance->socket, FIONBIO, &iMode) != 0)
+                        {
+                            open_result_detailed.code = WSAGetLastError();
+                            LogError("Failure: ioctlsocket failure %d for %s:%d.", open_result_detailed.code, hostname, socket_io_instance->port);
+                            (void)closesocket(socket_io_instance->socket);
+                            socket_io_instance->socket = INVALID_SOCKET;
+                            result = __FAILURE__;
+                        }
+                        else
+                        {
+                            LogInfo("TCP connection to %s:%d established successfully.", hostname, socket_io_instance->port);
+                            socket_io_instance->on_bytes_received = on_bytes_received;
+                            socket_io_instance->on_bytes_received_context = on_bytes_received_context;
 
-                        socket_io_instance->io_state = IO_STATE_OPEN;
+                            socket_io_instance->on_io_error = on_io_error;
+                            socket_io_instance->on_io_error_context = on_io_error_context;
 
-                        result = 0;
+                            socket_io_instance->io_state = IO_STATE_OPEN;
+
+                            result = 0;
+                        }
                     }
-
-                    freeaddrinfo(addrInfo);
                 }
+
+                freeaddrinfo(addrInfo);
             }
         }
     }

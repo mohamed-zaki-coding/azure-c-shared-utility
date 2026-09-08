@@ -3,9 +3,9 @@
 
 cmake_minimum_required(VERSION 3.12)
 
-if(MSVC)
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /IGNORE:4217")
-set(CMAKE_SHARED_LINKER_FLAGS "$(CMAKE_SHARED_LINKER_FLAGS) /IGNORE:4217")
+# This suite uses GNU ld syscall wrapping and is intentionally Linux-only.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    return()
 endif()
 
 compileAsC99()
@@ -22,3 +22,8 @@ set(${theseTestsName}_h_files
 )
 
 build_c_test_artifacts(${theseTestsName} ON "azure_c_shared_utility_tests")
+
+if(TARGET ${theseTestsName}_exe)
+    set_property(TARGET ${theseTestsName}_exe APPEND_STRING PROPERTY LINK_FLAGS
+        " -Wl,--wrap=getaddrinfo -Wl,--wrap=freeaddrinfo -Wl,--wrap=socket -Wl,--wrap=close -Wl,--wrap=fcntl -Wl,--wrap=connect -Wl,--wrap=poll -Wl,--wrap=getsockopt -Wl,--wrap=ioctl")
+endif()

@@ -181,6 +181,7 @@ ${LOGGING_C_FILE}
 ./src/hmac.c
 ./src/hmacsha256.c
 ./src/http_proxy_io.c
+./src/host_utils.c
 ./src/xio.c
 ./src/singlylinkedlist.c
 ./src/map.c

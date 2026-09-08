@@ -6,6 +6,7 @@
 #else
 #include <stdint.h>
 #endif
+#include <limits.h>
 
 #include "testrunnerswitcher.h"
 
@@ -60,7 +61,8 @@ void my_gballoc_free(void* ptr)
 #include "umock_c.h"
 #include "umocktypes_charptr.h"
 #include "azure_c_shared_utility/singlylinkedlist.h"
-static bool g_addrinfo_call_fail;
+static int g_addrinfo_result;
+static bool g_addrinfo_returns_null;
 //static int g_socket_send_size_value;
 static int g_socket_recv_size_value;
 
@@ -69,11 +71,34 @@ static const LIST_ITEM_HANDLE TEST_LIST_ITEM_HANDLE = (LIST_ITEM_HANDLE)0x11;
 static const void** list_items = NULL;
 static size_t list_item_count = 0;
 static SOCKET test_socket = (SOCKET)0x4243;
+static SOCKET g_socket_result;
 static size_t list_head_count = 0;
 static bool singlylinkedlist_add_called = false;
 static size_t callbackContext = 11;
-static const struct sockaddr test_sock_addr = { 0 };
-static ADDRINFO TEST_ADDR_INFO = { AI_PASSIVE, AF_INET, SOCK_STREAM, IPPROTO_TCP, 128, NULL, (struct sockaddr*)&test_sock_addr, NULL };
+static struct sockaddr_in test_ipv4_addr;
+static struct sockaddr_in6 test_ipv6_addr;
+static ADDRINFO TEST_ADDR_INFO;
+static ADDRINFO TEST_ADDR_INFO_SECOND;
+static PADDRINFOA g_addrinfo_result_list;
+static size_t getaddrinfo_call_count;
+static ADDRINFO captured_addr_hints;
+static const char* captured_node_name;
+static char captured_service_name[16];
+static size_t socket_call_count;
+static int captured_socket_family;
+static int captured_socket_type;
+static int captured_socket_protocol;
+static size_t connect_call_count;
+static SOCKET captured_connect_socket;
+static const struct sockaddr* captured_connect_address;
+static int captured_connect_address_length;
+static size_t closesocket_call_count;
+static SOCKET captured_closed_socket;
+static size_t freeaddrinfo_call_count;
+static PADDRINFOA captured_freed_addrinfo;
+static size_t open_complete_call_count;
+static void* open_complete_context;
+static IO_OPEN_RESULT_DETAILED open_complete_result;
 
 static const char* TEST_BUFFER_VALUE = "test_buffer_value";
 
@@ -86,10 +111,20 @@ static const char* TEST_BUFFER_VALUE = "test_buffer_value";
 static struct tcp_keepalive persisted_tcp_keepalive;
 
 MOCK_FUNCTION_WITH_CODE(WSAAPI, SOCKET, socket, int, af, int, type, int, protocol)
-MOCK_FUNCTION_END(test_socket)
+    socket_call_count++;
+    captured_socket_family = af;
+    captured_socket_type = type;
+    captured_socket_protocol = protocol;
+MOCK_FUNCTION_END(g_socket_result)
 MOCK_FUNCTION_WITH_CODE(WSAAPI, int, closesocket, SOCKET, s)
+    closesocket_call_count++;
+    captured_closed_socket = s;
 MOCK_FUNCTION_END(0)
 MOCK_FUNCTION_WITH_CODE(WSAAPI, int, connect, SOCKET, s, const struct sockaddr*, name, int, namelen)
+    connect_call_count++;
+    captured_connect_socket = s;
+    captured_connect_address = name;
+    captured_connect_address_length = namelen;
 MOCK_FUNCTION_END(0)
 MOCK_FUNCTION_WITH_CODE(WSAAPI, int, recv, SOCKET, s, char*, buf, int, len, int, flags)
     if (g_socket_recv_size_value >= 0)
@@ -104,29 +139,38 @@ len = g_socket_send_size_value;
 }*/
 MOCK_FUNCTION_END(len)
 MOCK_FUNCTION_WITH_CODE(WSAAPI, INT, getaddrinfo, PCSTR, pNodeName, PCSTR, pServiceName, const ADDRINFOA*, pHints, PADDRINFOA*, ppResult)
-int callFail;
-if (!g_addrinfo_call_fail)
-{
-    *ppResult = (PADDRINFOA)malloc(sizeof(ADDRINFOA));
-    memcpy(*ppResult, &TEST_ADDR_INFO, sizeof(ADDRINFOA));
-    callFail = 0;
-}
-else
-{
-    *ppResult = NULL;
-    callFail = __FAILURE__;
-}
-MOCK_FUNCTION_END(callFail)
+    getaddrinfo_call_count++;
+    captured_node_name = pNodeName;
+    (void)snprintf(captured_service_name, sizeof(captured_service_name), "%s", pServiceName);
+    captured_addr_hints = *pHints;
+    *ppResult = ((g_addrinfo_result == 0) && !g_addrinfo_returns_null) ? g_addrinfo_result_list : NULL;
+MOCK_FUNCTION_END(g_addrinfo_result)
 MOCK_FUNCTION_WITH_CODE(WSAAPI, void, freeaddrinfo, PADDRINFOA, pResult)
-if (pResult != NULL)
-{
-    free(pResult);
-}
+    freeaddrinfo_call_count++;
+    captured_freed_addrinfo = pResult;
 MOCK_FUNCTION_END()
 MOCK_FUNCTION_WITH_CODE(WSAAPI, int, WSAGetLastError)
 MOCK_FUNCTION_END(0)
 MOCK_FUNCTION_WITH_CODE(WSAAPI, int, ioctlsocket, SOCKET, s, long, cmd, u_long FAR*, argp)
 MOCK_FUNCTION_END(0)
+int WSAAPI setsockopt(SOCKET s, int level, int optname, const char* optval, int optlen)
+{
+    (void)s;
+    (void)level;
+    (void)optname;
+    (void)optval;
+    (void)optlen;
+    return 0;
+}
+
+PCSTR WSAAPI inet_ntop(INT Family, const VOID* pAddr, PSTR pStringBuf, size_t StringBufSize)
+{
+    (void)Family;
+    (void)pAddr;
+    (void)pStringBuf;
+    (void)StringBufSize;
+    return NULL;
+}
 MOCK_FUNCTION_WITH_CODE(WSAAPI, int, WSAIoctl, SOCKET, s, DWORD, dwIoControlCode, LPVOID, lpvInBuffer, DWORD, cbInBuffer, LPVOID, lpvOutBuffer, DWORD, cbOutBuffer, LPDWORD, lpcbBytesReturned, LPWSAOVERLAPPED, lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE, lpCompletionRoutine)
 (void)memcpy(&persisted_tcp_keepalive, lpvInBuffer, sizeof(struct tcp_keepalive));
 MOCK_FUNCTION_END(0)
@@ -198,10 +242,51 @@ static void test_on_bytes_received(void* context, const unsigned char* buffer, s
     (void)size;
 }
 
-static void test_on_io_open_complete(void* context, IO_OPEN_RESULT open_result)
+static void test_on_io_open_complete(void* context, IO_OPEN_RESULT_DETAILED open_result)
 {
-    (void)context;
-    (void)open_result;
+    open_complete_call_count++;
+    open_complete_context = context;
+    open_complete_result = open_result;
+}
+
+static void assert_open_complete(IO_OPEN_RESULT expected_result, int expected_code)
+{
+    ASSERT_ARE_EQUAL(size_t, 1, open_complete_call_count);
+    ASSERT_ARE_EQUAL(void_ptr, &callbackContext, open_complete_context);
+    ASSERT_ARE_EQUAL(int, expected_result, open_complete_result.result);
+    ASSERT_ARE_EQUAL(int, expected_code, open_complete_result.code);
+}
+
+static void assert_resolver_request(void)
+{
+    ASSERT_ARE_EQUAL(size_t, 1, getaddrinfo_call_count);
+    ASSERT_ARE_EQUAL(char_ptr, HOSTNAME_ARG, captured_node_name);
+    ASSERT_ARE_EQUAL(char_ptr, "80", captured_service_name);
+    ASSERT_ARE_EQUAL(int, 0, captured_addr_hints.ai_flags);
+    ASSERT_ARE_EQUAL(int, AF_UNSPEC, captured_addr_hints.ai_family);
+    ASSERT_ARE_EQUAL(int, SOCK_STREAM, captured_addr_hints.ai_socktype);
+    ASSERT_ARE_EQUAL(int, 0, captured_addr_hints.ai_protocol);
+}
+
+static void test_on_io_error(void* context);
+
+static void assert_open_rejects_resolved_address(CONCRETE_IO_HANDLE io_handle, int expected_code)
+{
+    umock_c_reset_all_calls();
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
+    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO)).IgnoreArgument_pResult();
+
+    int result = socketio_open(io_handle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+
+    ASSERT_ARE_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    assert_resolver_request();
+    ASSERT_ARE_EQUAL(size_t, 0, socket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, connect_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, closesocket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 1, freeaddrinfo_call_count);
+    ASSERT_ARE_EQUAL(void_ptr, &TEST_ADDR_INFO, captured_freed_addrinfo);
+    assert_open_complete(IO_OPEN_ERROR, expected_code);
 }
 
 static void test_on_io_close_complete(void* context)
@@ -407,9 +492,53 @@ TEST_FUNCTION_INITIALIZE(method_init)
     whenShallmalloc_fail = 0;
     list_head_count = 0;
     singlylinkedlist_add_called = false;
-    g_addrinfo_call_fail = false;
+    g_addrinfo_result = 0;
+    g_addrinfo_returns_null = false;
     //g_socket_send_size_value = -1;
     g_socket_recv_size_value = -1;
+
+    (void)memset(&test_ipv4_addr, 0, sizeof(test_ipv4_addr));
+    test_ipv4_addr.sin_family = AF_INET;
+    test_ipv4_addr.sin_addr.S_un.S_addr = 0x0100007F;
+    (void)memset(&test_ipv6_addr, 0, sizeof(test_ipv6_addr));
+    test_ipv6_addr.sin6_family = AF_INET6;
+    test_ipv6_addr.sin6_addr.u.Byte[15] = 1;
+
+    (void)memset(&TEST_ADDR_INFO, 0, sizeof(TEST_ADDR_INFO));
+    TEST_ADDR_INFO.ai_family = AF_INET;
+    TEST_ADDR_INFO.ai_socktype = SOCK_STREAM;
+    TEST_ADDR_INFO.ai_protocol = IPPROTO_TCP;
+    TEST_ADDR_INFO.ai_addrlen = sizeof(test_ipv4_addr);
+    TEST_ADDR_INFO.ai_addr = (struct sockaddr*)&test_ipv4_addr;
+    (void)memset(&TEST_ADDR_INFO_SECOND, 0, sizeof(TEST_ADDR_INFO_SECOND));
+    TEST_ADDR_INFO_SECOND.ai_family = AF_INET6;
+    TEST_ADDR_INFO_SECOND.ai_socktype = SOCK_STREAM;
+    TEST_ADDR_INFO_SECOND.ai_protocol = IPPROTO_TCP;
+    TEST_ADDR_INFO_SECOND.ai_addrlen = sizeof(test_ipv6_addr);
+    TEST_ADDR_INFO_SECOND.ai_addr = (struct sockaddr*)&test_ipv6_addr;
+    g_addrinfo_result_list = &TEST_ADDR_INFO;
+
+    getaddrinfo_call_count = 0;
+    (void)memset(&captured_addr_hints, 0, sizeof(captured_addr_hints));
+    captured_node_name = NULL;
+    captured_service_name[0] = '\0';
+    g_socket_result = test_socket;
+    socket_call_count = 0;
+    captured_socket_family = 0;
+    captured_socket_type = 0;
+    captured_socket_protocol = 0;
+    connect_call_count = 0;
+    captured_connect_socket = INVALID_SOCKET;
+    captured_connect_address = NULL;
+    captured_connect_address_length = 0;
+    closesocket_call_count = 0;
+    captured_closed_socket = INVALID_SOCKET;
+    freeaddrinfo_call_count = 0;
+    captured_freed_addrinfo = NULL;
+    open_complete_call_count = 0;
+    open_complete_context = NULL;
+    open_complete_result.result = IO_OPEN_ERROR;
+    open_complete_result.code = 0;
 }
 
 TEST_FUNCTION_CLEANUP(method_cleanup)
@@ -530,151 +659,450 @@ TEST_FUNCTION(socketio_open_socket_io_NULL_fails)
 
     // assert
     ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
-    ASSERT_ARE_NOT_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(size_t, 1, open_complete_call_count);
+    ASSERT_ARE_EQUAL(void_ptr, &callbackContext, open_complete_context);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, open_complete_result.result);
+    ASSERT_ARE_NOT_EQUAL(int, 0, open_complete_result.code);
 }
 
-TEST_FUNCTION(socketio_open_socket_fails)
+TEST_FUNCTION(socketio_open_getaddrinfo_failure_does_not_create_or_close_a_socket)
 {
     // arrange
-    int result;
     SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
     CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    g_addrinfo_result = WSAHOST_NOT_FOUND;
+    g_socket_result = INVALID_SOCKET; /* Prevent stale socket-first code from reaching DNS. */
 
     umock_c_reset_all_calls();
-
-    EXPECTED_CALL(socket(IGNORED_NUM_ARG, IGNORED_NUM_ARG, IGNORED_NUM_ARG))
-        .SetReturn(INVALID_SOCKET);
-
-#ifndef NO_LOGGING
-    EXPECTED_CALL(WSAGetLastError());
-#endif
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
 
     // act
-    result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+    int result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
 
     // assert
-    ASSERT_ARE_NOT_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(int, 0, result);
     ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    assert_resolver_request();
+    ASSERT_ARE_EQUAL(size_t, 0, socket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, connect_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, closesocket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, freeaddrinfo_call_count);
+    assert_open_complete(IO_OPEN_ERROR, WSAHOST_NOT_FOUND);
 
     // cleanup
     socketio_destroy(ioHandle);
 }
 
-TEST_FUNCTION(socketio_open_getaddrinfo_fails)
+TEST_FUNCTION(socketio_open_getaddrinfo_success_with_NULL_result_does_not_create_or_close_a_socket)
 {
     // arrange
-    int result;
     SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
     CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    g_addrinfo_returns_null = true;
+    g_socket_result = INVALID_SOCKET; /* Prevent stale socket-first code from dereferencing NULL. */
 
     umock_c_reset_all_calls();
-
-    g_addrinfo_call_fail = true;
-    EXPECTED_CALL(socket(IGNORED_NUM_ARG, IGNORED_NUM_ARG, IGNORED_NUM_ARG));
-    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG));
-
-#ifndef NO_LOGGING
-    EXPECTED_CALL(WSAGetLastError());
-#endif
-
-    EXPECTED_CALL(closesocket(IGNORED_NUM_ARG));
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
 
     // act
-    result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+    int result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
 
     // assert
-    ASSERT_ARE_NOT_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(int, 0, result);
     ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    assert_resolver_request();
+    ASSERT_ARE_EQUAL(size_t, 0, socket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, connect_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, closesocket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, freeaddrinfo_call_count);
+    assert_open_complete(IO_OPEN_ERROR, WSAHOST_NOT_FOUND);
 
     // cleanup
     socketio_destroy(ioHandle);
 }
 
-TEST_FUNCTION(socketio_open_connect_fails)
+TEST_FUNCTION(socketio_open_rejects_NULL_resolved_address)
 {
     // arrange
-    int result;
     SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
     CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    TEST_ADDR_INFO.ai_addr = NULL;
 
-    umock_c_reset_all_calls();
-
-    EXPECTED_CALL(socket(IGNORED_NUM_ARG, IGNORED_NUM_ARG, IGNORED_NUM_ARG));
-    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG));
-    EXPECTED_CALL(connect(IGNORED_NUM_ARG, &test_sock_addr, IGNORED_NUM_ARG))
-        .SetReturn(WSAECONNREFUSED);
-
-#ifndef NO_LOGGING
-    EXPECTED_CALL(WSAGetLastError());
-#endif
-
-    EXPECTED_CALL(closesocket(IGNORED_NUM_ARG));
-    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO));
-
-    // act
-    result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
-
-    // assert
-    ASSERT_ARE_NOT_EQUAL(int, 0, result);
-    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    // act and assert
+    assert_open_rejects_resolved_address(ioHandle, WSAEINVAL);
 
     // cleanup
     socketio_destroy(ioHandle);
 }
 
-TEST_FUNCTION(socketio_open_ioctlsocket_fails)
+TEST_FUNCTION(socketio_open_short_length_does_not_dereference_address)
 {
     // arrange
-    int result;
     SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
     CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
-    static ADDRINFO addrInfo = { AI_PASSIVE, AF_INET, SOCK_STREAM, IPPROTO_TCP, 128, NULL, (struct sockaddr*)0x11, NULL };
+    bool access_violation = false;
+    int result = __FAILURE__;
+    TEST_ADDR_INFO.ai_addr = (struct sockaddr*)(uintptr_t)1;
+    TEST_ADDR_INFO.ai_addrlen = 0;
 
     umock_c_reset_all_calls();
-
-    EXPECTED_CALL(socket(IGNORED_NUM_ARG, IGNORED_NUM_ARG, IGNORED_NUM_ARG));
-    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG));
-    EXPECTED_CALL(connect(IGNORED_NUM_ARG, &test_sock_addr, IGNORED_NUM_ARG));
-    EXPECTED_CALL(ioctlsocket(IGNORED_NUM_ARG, IGNORED_NUM_ARG, IGNORED_PTR_ARG))
-        .SetReturn(WSAENETDOWN);
-
-#ifndef NO_LOGGING
-    EXPECTED_CALL(WSAGetLastError());
-#endif
-
-    EXPECTED_CALL(closesocket(IGNORED_NUM_ARG));
-    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO));
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
+    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO)).IgnoreArgument_pResult();
 
     // act
-    result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+    __try
+    {
+        result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        access_violation = true;
+    }
+
+    if (access_violation)
+    {
+        umock_c_reset_all_calls();
+        socketio_destroy(ioHandle);
+    }
 
     // assert
-    ASSERT_ARE_NOT_EQUAL(int, 0, result);
+    ASSERT_IS_FALSE(access_violation);
+    ASSERT_ARE_EQUAL(int, 0, result);
     ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    assert_resolver_request();
+    ASSERT_ARE_EQUAL(size_t, 0, socket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, connect_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, closesocket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 1, freeaddrinfo_call_count);
+    ASSERT_ARE_EQUAL(void_ptr, &TEST_ADDR_INFO, captured_freed_addrinfo);
+    assert_open_complete(IO_OPEN_ERROR, WSAEINVAL);
 
     // cleanup
     socketio_destroy(ioHandle);
 }
 
-TEST_FUNCTION(socketio_open_succeeds)
+TEST_FUNCTION(socketio_open_rejects_zero_length_IPv4_address)
 {
     // arrange
-    int result;
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    TEST_ADDR_INFO.ai_addrlen = 0;
+
+    // act and assert
+    assert_open_rejects_resolved_address(ioHandle, WSAEINVAL);
+
+    // cleanup
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_rejects_short_IPv4_address)
+{
+    // arrange
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    TEST_ADDR_INFO.ai_addrlen = sizeof(test_ipv4_addr) - 1;
+
+    // act and assert
+    assert_open_rejects_resolved_address(ioHandle, WSAEINVAL);
+
+    // cleanup
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_rejects_short_IPv6_address)
+{
+    // arrange
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    TEST_ADDR_INFO.ai_family = AF_INET6;
+    TEST_ADDR_INFO.ai_addr = (struct sockaddr*)&test_ipv6_addr;
+    TEST_ADDR_INFO.ai_addrlen = sizeof(test_ipv6_addr) - 1;
+
+    // act and assert
+    assert_open_rejects_resolved_address(ioHandle, WSAEINVAL);
+
+    // cleanup
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_rejects_unsupported_address_family)
+{
+    // arrange
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    TEST_ADDR_INFO.ai_family = AF_UNSPEC;
+
+    // act and assert
+    assert_open_rejects_resolved_address(ioHandle, WSAEAFNOSUPPORT);
+
+    // cleanup
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_rejects_mismatched_address_family)
+{
+    // arrange
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    test_ipv6_addr.sin6_family = AF_INET;
+    TEST_ADDR_INFO.ai_family = AF_INET6;
+    TEST_ADDR_INFO.ai_addr = (struct sockaddr*)&test_ipv6_addr;
+    TEST_ADDR_INFO.ai_addrlen = sizeof(test_ipv6_addr);
+
+    // act and assert
+    assert_open_rejects_resolved_address(ioHandle, WSAEINVAL);
+
+    // cleanup
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_rejects_address_length_that_does_not_fit_connect)
+{
+    // arrange
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    TEST_ADDR_INFO.ai_addrlen = (size_t)INT_MAX + 1;
+
+    umock_c_reset_all_calls();
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
+    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO)).IgnoreArgument_pResult();
+
+    // act
+    int result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+
+    // assert
+    ASSERT_ARE_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    assert_resolver_request();
+    ASSERT_ARE_EQUAL(size_t, 0, socket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, connect_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, closesocket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 1, freeaddrinfo_call_count);
+    ASSERT_ARE_EQUAL(void_ptr, &TEST_ADDR_INFO, captured_freed_addrinfo);
+    assert_open_complete(IO_OPEN_ERROR, WSAEINVAL);
+
+    // cleanup
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_socket_failure_frees_addrinfo_without_closing_a_socket)
+{
+    // arrange
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    TEST_ADDR_INFO.ai_socktype = SOCK_RDM;
+    TEST_ADDR_INFO.ai_protocol = IPPROTO_UDP;
+    g_socket_result = INVALID_SOCKET;
+
+    umock_c_reset_all_calls();
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
+    EXPECTED_CALL(socket(AF_INET, SOCK_RDM, IPPROTO_UDP)).SetReturn(INVALID_SOCKET);
+    EXPECTED_CALL(WSAGetLastError()).SetReturn(WSAEMFILE);
+    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO)).IgnoreArgument_pResult();
+
+    // act
+    int result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+
+    // assert
+    ASSERT_ARE_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    assert_resolver_request();
+    ASSERT_ARE_EQUAL(size_t, 1, socket_call_count);
+    ASSERT_ARE_EQUAL(int, AF_INET, captured_socket_family);
+    ASSERT_ARE_EQUAL(int, SOCK_RDM, captured_socket_type);
+    ASSERT_ARE_EQUAL(int, IPPROTO_UDP, captured_socket_protocol);
+    ASSERT_ARE_EQUAL(size_t, 0, connect_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, closesocket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 1, freeaddrinfo_call_count);
+    ASSERT_ARE_EQUAL(void_ptr, &TEST_ADDR_INFO, captured_freed_addrinfo);
+    assert_open_complete(IO_OPEN_ERROR, WSAEMFILE);
+
+    // cleanup
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_connect_failure_uses_only_first_result_and_cleans_up_once)
+{
+    // arrange
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    TEST_ADDR_INFO.ai_socktype = SOCK_RDM;
+    TEST_ADDR_INFO.ai_protocol = IPPROTO_UDP;
+    TEST_ADDR_INFO.ai_next = &TEST_ADDR_INFO_SECOND;
+
+    umock_c_reset_all_calls();
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
+    EXPECTED_CALL(socket(AF_INET, SOCK_RDM, IPPROTO_UDP));
+    EXPECTED_CALL(connect(test_socket, (struct sockaddr*)&test_ipv4_addr, sizeof(test_ipv4_addr))).IgnoreArgument_name().SetReturn(SOCKET_ERROR);
+    EXPECTED_CALL(WSAGetLastError()).SetReturn(WSAECONNREFUSED);
+    EXPECTED_CALL(closesocket(test_socket));
+    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO)).IgnoreArgument_pResult();
+
+    // act
+    int result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+
+    // assert
+    ASSERT_ARE_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    assert_resolver_request();
+    ASSERT_ARE_EQUAL(size_t, 1, socket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 1, connect_call_count);
+    ASSERT_ARE_EQUAL(void_ptr, &test_ipv4_addr, captured_connect_address);
+    ASSERT_ARE_EQUAL(int, sizeof(test_ipv4_addr), captured_connect_address_length);
+    ASSERT_ARE_EQUAL(size_t, 1, closesocket_call_count);
+    ASSERT_ARE_EQUAL(size_t, (size_t)test_socket, (size_t)captured_closed_socket);
+    ASSERT_ARE_EQUAL(size_t, 1, freeaddrinfo_call_count);
+    ASSERT_ARE_EQUAL(void_ptr, &TEST_ADDR_INFO, captured_freed_addrinfo);
+    assert_open_complete(IO_OPEN_ERROR, WSAECONNREFUSED);
+
+    // cleanup
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_ioctlsocket_failure_closes_socket_and_frees_addrinfo_once)
+{
+    // arrange
     SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
     CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
 
     umock_c_reset_all_calls();
-
-    EXPECTED_CALL(socket(IGNORED_NUM_ARG, IGNORED_NUM_ARG, IGNORED_NUM_ARG));
-    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG));
-    EXPECTED_CALL(connect(IGNORED_NUM_ARG, &test_sock_addr, IGNORED_NUM_ARG));
-    EXPECTED_CALL(ioctlsocket(IGNORED_NUM_ARG, IGNORED_NUM_ARG, IGNORED_PTR_ARG));
-    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO));
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
+    EXPECTED_CALL(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+    EXPECTED_CALL(connect(test_socket, (struct sockaddr*)&test_ipv4_addr, sizeof(test_ipv4_addr))).IgnoreArgument_name();
+    EXPECTED_CALL(ioctlsocket(test_socket, FIONBIO, IGNORED_PTR_ARG)).SetReturn(SOCKET_ERROR);
+    EXPECTED_CALL(WSAGetLastError()).SetReturn(WSAENETDOWN);
+    EXPECTED_CALL(closesocket(test_socket));
+    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO)).IgnoreArgument_pResult();
 
     // act
-    result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+    int result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
 
     // assert
+    ASSERT_ARE_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    assert_resolver_request();
+    ASSERT_ARE_EQUAL(size_t, 1, socket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 1, connect_call_count);
+    ASSERT_ARE_EQUAL(size_t, 1, closesocket_call_count);
+    ASSERT_ARE_EQUAL(size_t, (size_t)test_socket, (size_t)captured_closed_socket);
+    ASSERT_ARE_EQUAL(size_t, 1, freeaddrinfo_call_count);
+    ASSERT_ARE_EQUAL(void_ptr, &TEST_ADDR_INFO, captured_freed_addrinfo);
+    assert_open_complete(IO_OPEN_ERROR, WSAENETDOWN);
+
+    // cleanup
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_ipv4_first_result_uses_returned_socket_fields_and_ignores_ipv6_second)
+{
+    // arrange
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    TEST_ADDR_INFO.ai_socktype = SOCK_RDM;
+    TEST_ADDR_INFO.ai_protocol = IPPROTO_UDP;
+    TEST_ADDR_INFO.ai_next = &TEST_ADDR_INFO_SECOND;
+
+    umock_c_reset_all_calls();
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
+    EXPECTED_CALL(socket(AF_INET, SOCK_RDM, IPPROTO_UDP));
+    EXPECTED_CALL(connect(test_socket, (struct sockaddr*)&test_ipv4_addr, sizeof(test_ipv4_addr))).IgnoreArgument_name();
+    EXPECTED_CALL(ioctlsocket(test_socket, FIONBIO, IGNORED_PTR_ARG));
+    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO)).IgnoreArgument_pResult();
+
+    // act
+    int result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+
+    // assert
+    ASSERT_ARE_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    assert_resolver_request();
+    ASSERT_ARE_EQUAL(size_t, 1, socket_call_count);
+    ASSERT_ARE_EQUAL(int, AF_INET, captured_socket_family);
+    ASSERT_ARE_EQUAL(int, SOCK_RDM, captured_socket_type);
+    ASSERT_ARE_EQUAL(int, IPPROTO_UDP, captured_socket_protocol);
+    ASSERT_ARE_EQUAL(size_t, 1, connect_call_count);
+    ASSERT_ARE_EQUAL(size_t, (size_t)test_socket, (size_t)captured_connect_socket);
+    ASSERT_ARE_EQUAL(void_ptr, &test_ipv4_addr, captured_connect_address);
+    ASSERT_ARE_EQUAL(int, sizeof(test_ipv4_addr), captured_connect_address_length);
+    ASSERT_ARE_EQUAL(size_t, 0, closesocket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 1, freeaddrinfo_call_count);
+    ASSERT_ARE_EQUAL(void_ptr, &TEST_ADDR_INFO, captured_freed_addrinfo);
+    assert_open_complete(IO_OPEN_OK, 0);
+
+    // cleanup
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_ipv6_first_result_uses_returned_socket_fields_and_ignores_ipv4_second)
+{
+    // arrange
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    TEST_ADDR_INFO.ai_family = AF_INET6;
+    TEST_ADDR_INFO.ai_socktype = SOCK_SEQPACKET;
+    TEST_ADDR_INFO.ai_protocol = IPPROTO_IPV6;
+    TEST_ADDR_INFO.ai_addrlen = sizeof(test_ipv6_addr);
+    TEST_ADDR_INFO.ai_addr = (struct sockaddr*)&test_ipv6_addr;
+    TEST_ADDR_INFO.ai_next = &TEST_ADDR_INFO_SECOND;
+    TEST_ADDR_INFO_SECOND.ai_family = AF_INET;
+    TEST_ADDR_INFO_SECOND.ai_addrlen = sizeof(test_ipv4_addr);
+    TEST_ADDR_INFO_SECOND.ai_addr = (struct sockaddr*)&test_ipv4_addr;
+
+    umock_c_reset_all_calls();
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
+    EXPECTED_CALL(socket(AF_INET6, SOCK_SEQPACKET, IPPROTO_IPV6));
+    EXPECTED_CALL(connect(test_socket, (struct sockaddr*)&test_ipv6_addr, sizeof(test_ipv6_addr))).IgnoreArgument_name();
+    EXPECTED_CALL(ioctlsocket(test_socket, FIONBIO, IGNORED_PTR_ARG));
+    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO)).IgnoreArgument_pResult();
+
+    // act
+    int result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+
+    // assert
+    ASSERT_ARE_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    assert_resolver_request();
+    ASSERT_ARE_EQUAL(size_t, 1, socket_call_count);
+    ASSERT_ARE_EQUAL(int, AF_INET6, captured_socket_family);
+    ASSERT_ARE_EQUAL(int, SOCK_SEQPACKET, captured_socket_type);
+    ASSERT_ARE_EQUAL(int, IPPROTO_IPV6, captured_socket_protocol);
+    ASSERT_ARE_EQUAL(size_t, 1, connect_call_count);
+    ASSERT_ARE_EQUAL(size_t, (size_t)test_socket, (size_t)captured_connect_socket);
+    ASSERT_ARE_EQUAL(void_ptr, &test_ipv6_addr, captured_connect_address);
+    ASSERT_ARE_EQUAL(int, sizeof(test_ipv6_addr), captured_connect_address_length);
+    ASSERT_ARE_EQUAL(size_t, 0, closesocket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 1, freeaddrinfo_call_count);
+    ASSERT_ARE_EQUAL(void_ptr, &TEST_ADDR_INFO, captured_freed_addrinfo);
+    assert_open_complete(IO_OPEN_OK, 0);
+
+    // cleanup
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_accepted_socket_bypasses_resolution_and_socket_creation)
+{
+    // arrange
+    SOCKET accepted_socket = (SOCKET)0x9876;
+    SOCKETIO_CONFIG socketConfig = { NULL, PORT_NUM, &accepted_socket };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    umock_c_reset_all_calls();
+
+    // act
+    int result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext, test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+
+    // assert
+    ASSERT_ARE_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+    ASSERT_ARE_EQUAL(size_t, 0, getaddrinfo_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, socket_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, connect_call_count);
+    ASSERT_ARE_EQUAL(size_t, 0, freeaddrinfo_call_count);
+    assert_open_complete(IO_OPEN_OK, 0);
+
+    umock_c_reset_all_calls();
+    EXPECTED_CALL(closesocket(accepted_socket));
+    result = socketio_close(ioHandle, NULL, NULL);
     ASSERT_ARE_EQUAL(int, 0, result);
     ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
 
