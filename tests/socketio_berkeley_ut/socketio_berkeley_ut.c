@@ -75,6 +75,7 @@ static void my_gballoc_free(void* ptr)
 #undef ENABLE_MOCKS
 
 #include "azure_c_shared_utility/socketio.h"
+#include "azure_c_shared_utility/shared_util_options.h"
 #include "azure_c_shared_utility/xio.h"
 
 // The adapter's own per-address grant. Kept as a literal on purpose: if the
