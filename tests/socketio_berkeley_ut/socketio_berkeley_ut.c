@@ -714,4 +714,24 @@ TEST_FUNCTION(socketio_open_with_ipv6_opt_in_preserves_ipv4_fallback)
     socketio_destroy(ioHandle);
 }
 
+TEST_FUNCTION(socketio_setoption_enable_ipv6_before_open_enables_dual_stack_resolution)
+{
+    const int families[] = { AF_INET6 };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+    int enable_ipv6 = 1;
+
+    given_candidates(1, families, outcomes);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 0);
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_setoption(ioHandle, OPTION_ENABLE_IPV6, &enable_ipv6));
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, AF_UNSPEC, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, AF_INET6, g_connect_families[0]);
+
+    socketio_destroy(ioHandle);
+}
+
 END_TEST_SUITE(socketio_berkeley_unittests)
