@@ -110,6 +110,8 @@ static int g_poll_timeouts_ms[MAX_CANDIDATES];
 static size_t g_poll_count;
 static size_t g_v6only_cleared_count;
 static int g_v6only_last_value;
+static int g_last_addrinfo_family;
+static int g_last_addrinfo_flags;
 
 static IO_OPEN_RESULT_DETAILED g_open_result;
 
@@ -211,6 +213,8 @@ MOCK_FUNCTION_WITH_CODE(, int, getaddrinfo, const char*, node, const char*, serv
 size_t candidate_index;
 struct addrinfo* head = NULL;
 struct addrinfo* tail = NULL;
+g_last_addrinfo_family = (hints != NULL) ? hints->ai_family : -1;
+g_last_addrinfo_flags = (hints != NULL) ? hints->ai_flags : -1;
 for (candidate_index = 0; candidate_index < g_candidate_count; candidate_index++)
 {
     struct addrinfo* entry = (struct addrinfo*)calloc(1, sizeof(struct addrinfo));
@@ -346,9 +350,9 @@ static void given_candidates(size_t count, const int* families, const ATTEMPT_OU
     }
 }
 
-static CONCRETE_IO_HANDLE create_socket_io(void)
+static CONCRETE_IO_HANDLE create_socket_io(const char* hostname, int enable_ipv6)
 {
-    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    SOCKETIO_CONFIG socketConfig = { hostname, PORT_NUM, NULL, enable_ipv6 };
     CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
     ASSERT_IS_NOT_NULL(ioHandle);
     return ioHandle;
@@ -427,6 +431,8 @@ TEST_FUNCTION_INITIALIZE(method_init)
     g_poll_count = 0;
     g_v6only_cleared_count = 0;
     g_v6only_last_value = -1;
+    g_last_addrinfo_family = -1;
+    g_last_addrinfo_flags = -1;
     list_item_count = 0;
     singlylinkedlist_add_called = false;
     g_open_result.result = IO_OPEN_CANCELLED;
@@ -449,7 +455,7 @@ TEST_FUNCTION(socketio_open_grants_every_address_the_full_timeout)
     int result;
 
     given_candidates(2, families, outcomes);
-    ioHandle = create_socket_io();
+    ioHandle = create_socket_io(HOSTNAME_ARG, 0);
 
     result = socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
 
@@ -462,9 +468,8 @@ TEST_FUNCTION(socketio_open_grants_every_address_the_full_timeout)
     socketio_destroy(ioHandle);
 }
 
-/* The case the Windows family reserve used to exist for. However many
-   black-holed addresses of one family come first, the family behind them still
-   has to get its attempt - a shared budget is what previously starved it. */
+/* However many black-holed addresses of one family come first, the family
+   behind them still has to get its attempt. Each address has its own grant. */
 TEST_FUNCTION(socketio_open_reaches_ipv4_after_two_blackholed_ipv6_candidates)
 {
     const int families[] = { AF_INET6, AF_INET6, AF_INET };
@@ -473,7 +478,7 @@ TEST_FUNCTION(socketio_open_reaches_ipv4_after_two_blackholed_ipv6_candidates)
     int result;
 
     given_candidates(3, families, outcomes);
-    ioHandle = create_socket_io();
+    ioHandle = create_socket_io(HOSTNAME_ARG, 0);
 
     result = socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
 
@@ -488,8 +493,8 @@ TEST_FUNCTION(socketio_open_reaches_ipv4_after_two_blackholed_ipv6_candidates)
     socketio_destroy(ioHandle);
 }
 
-/* Three is the shape that failed hardest under the old shared budget: the first
-   two attempts consumed it and the IPv4 candidate was never reached at all. */
+/* Three candidates exercise repeated per-address grants and ensure the later
+   IPv4 candidate is not starved by earlier timeouts. */
 TEST_FUNCTION(socketio_open_reaches_ipv4_after_three_blackholed_ipv6_candidates)
 {
     const int families[] = { AF_INET6, AF_INET6, AF_INET6, AF_INET };
@@ -498,7 +503,7 @@ TEST_FUNCTION(socketio_open_reaches_ipv4_after_three_blackholed_ipv6_candidates)
     int result;
 
     given_candidates(4, families, outcomes);
-    ioHandle = create_socket_io();
+    ioHandle = create_socket_io(HOSTNAME_ARG, 0);
 
     result = socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
 
@@ -524,7 +529,7 @@ TEST_FUNCTION(socketio_open_refused_address_does_not_reduce_the_next_grant)
     int result;
 
     given_candidates(2, families, outcomes);
-    ioHandle = create_socket_io();
+    ioHandle = create_socket_io(HOSTNAME_ARG, 0);
 
     result = socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
 
@@ -547,7 +552,7 @@ TEST_FUNCTION(socketio_open_fails_and_releases_every_socket_when_all_candidates_
     size_t fds_before;
 
     given_candidates(2, families, outcomes);
-    ioHandle = create_socket_io();
+    ioHandle = create_socket_io(HOSTNAME_ARG, 0);
 
     fds_before = open_fd_count();
 
@@ -578,7 +583,7 @@ TEST_FUNCTION(socketio_open_clears_ipv6_v6only_on_inet6_sockets_only)
     int result;
 
     given_candidates(2, families, outcomes);
-    ioHandle = create_socket_io();
+    ioHandle = create_socket_io(HOSTNAME_ARG, 0);
 
     result = socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
 
@@ -600,7 +605,7 @@ TEST_FUNCTION(socketio_open_single_address_gets_the_full_timeout)
     int result;
 
     given_candidates(1, families, outcomes);
-    ioHandle = create_socket_io();
+    ioHandle = create_socket_io(HOSTNAME_ARG, 0);
 
     result = socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
 
@@ -621,7 +626,7 @@ TEST_FUNCTION(socketio_open_stops_at_the_first_candidate_that_connects)
     int result;
 
     given_candidates(2, families, outcomes);
-    ioHandle = create_socket_io();
+    ioHandle = create_socket_io(HOSTNAME_ARG, 0);
 
     result = socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
 
@@ -629,6 +634,82 @@ TEST_FUNCTION(socketio_open_stops_at_the_first_candidate_that_connects)
     ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
     ASSERT_ARE_EQUAL(size_t, (size_t)1, g_connect_attempt_count);
     ASSERT_ARE_EQUAL(int, AF_INET6, g_connect_families[0]);
+
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_without_ipv6_opt_in_requests_ipv4_only)
+{
+    const int families[] = { AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(1, families, outcomes);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 0);
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, AF_INET, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, 0, g_last_addrinfo_flags);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, AF_INET, g_connect_families[0]);
+
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_with_ipv6_opt_in_requests_both_families)
+{
+    const int families[] = { AF_INET6, AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS, ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(2, families, outcomes);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, AF_UNSPEC, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, 0, g_last_addrinfo_flags);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_connect_attempt_count);
+    ASSERT_ARE_EQUAL(int, AF_INET6, g_connect_families[0]);
+
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_ipv6_literal_requests_both_families_without_opt_in)
+{
+    const int families[] = { AF_INET6 };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(1, families, outcomes);
+    ioHandle = create_socket_io("::1", 0);
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, AF_UNSPEC, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, AF_INET6, g_connect_families[0]);
+
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_with_ipv6_opt_in_preserves_ipv4_fallback)
+{
+    const int families[] = { AF_INET6, AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_REFUSED, ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(2, families, outcomes);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, AF_UNSPEC, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(size_t, (size_t)2, g_connect_attempt_count);
+    ASSERT_ARE_EQUAL(int, AF_INET, g_connect_families[1]);
 
     socketio_destroy(ioHandle);
 }
