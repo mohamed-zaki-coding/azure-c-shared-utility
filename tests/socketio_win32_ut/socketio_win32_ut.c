@@ -150,8 +150,8 @@ if (!g_addrinfo_call_fail)
     memcpy(*ppResult, &TEST_ADDR_INFO, sizeof(ADDRINFOA));
     if (g_addrinfo_dual_stack)
     {
-        /* IPv6, IPv6, IPv4 - the IPv4 candidate is only reachable if the
-           connect loop still has budget left when it gets there. */
+        /* IPv6, IPv6, IPv4 - the IPv4 candidate verifies sequential fallback
+           after each preceding address receives its own connect grant. */
         memcpy(*ppResult, &TEST_ADDR_INFO6, sizeof(ADDRINFOA));
         (*ppResult)->ai_next = (PADDRINFOA)malloc(sizeof(ADDRINFOA));
         memcpy((*ppResult)->ai_next, &TEST_ADDR_INFO6, sizeof(ADDRINFOA));

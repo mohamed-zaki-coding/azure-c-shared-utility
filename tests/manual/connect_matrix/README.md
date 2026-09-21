@@ -11,9 +11,9 @@ That is the right place for the logic.
 
 What it cannot show is the part that is a *timing* behaviour:
 
-- that a genuinely blackholed address is abandoned when the budget expires,
+- that a genuinely blackholed address is abandoned when its per-address grant expires,
   rather than running to the OS timeout - about 21 s on Windows;
-- that an immediate refusal really does cost nothing from the shared budget;
+- that an immediate refusal really does move to the next candidate immediately;
 - that a reachable candidate sitting behind blackholed ones is still reached.
 
 This harness measures those directly, on a real stack.
@@ -62,51 +62,29 @@ measured 10002 ms against 21075 ms for a plain blocking connect to the same
 address. The bound is at parity across the two adapters.
 
 `::ffff:127.0.0.1` is *accepted* here and reaches the IPv4 stack: against a port
-with a listener it returns `OPEN_OK`. Linux leaves `IPV6_V6ONLY` off, whereas
-`socketio_win32.c` leaves it at the Windows default and the same literal is
-refused with `WSAEADDRNOTAVAIL`. Both are as implemented; the difference is
-expected and is worth stating somewhere, because only the Windows side is
-currently covered by a test.
+with a listener it returns `OPEN_OK`. Both adapters now clear `IPV6_V6ONLY` for
+AF_INET6 sockets, so Windows and Linux have the same intended behavior.
 
 Preferred family blackholed, with a reachable IPv4 candidate behind it:
 
 | Blackholed IPv6 candidates | Result | IPv4 attempted |
 | --- | --- | --- |
-| 1 | `OPEN_OK` after 5000 ms | yes |
-| 2 | `OPEN_ERROR` 110 after 10000 ms | no |
-| 3 | `OPEN_ERROR` 110 after 10000 ms | no |
+| 1 | `OPEN_OK` after about 10000 ms | yes |
+| 2 | `OPEN_OK` after about 20000 ms | yes |
+| 3 | `OPEN_OK` after about 30000 ms | yes |
 
-One blackholed candidate is capped at `CONNECT_ATTEMPT_TIMEOUT_MS` (5000 ms),
-leaving 5000 ms for the IPv4 candidate, which connects. From two onwards the
-shared 10 s budget is spent entirely inside the preferred family and the other
-family is never attempted.
+Every candidate receives the full `CONNECT_TIMEOUT_MS` grant. The total can
+therefore grow to approximately the number of timed-out candidates multiplied
+by 10 seconds before a later healthy candidate succeeds.
 
-`socketio_win32.c` holds budget back for a family it has not tried yet -
-`CONNECT_FAMILY_RESERVE_MS` together with `untried_family_ahead()` - and
-`tests/socketio_win32_ut` covers it in
-`socketio_open_reserves_budget_for_untried_address_family`.
-`socketio_berkeley.c` has no equivalent, and there is no corresponding Berkeley
-unit test.
-
-This matters wherever a host prefers IPv6 and IPv6 is broken while IPv4 works,
-which is the common failure mode this feature is meant to survive. A host using
-DNS64 is exposed to it too: DNS64 synthesises a AAAA for every IPv4-only
-service, so if NAT64 stops forwarding, every synthesised address blackholes at
-once and there is usually more than one.
-
-The gap is acknowledged in the commit message of `09560c1bcb`:
-
-> It is not a substitute for iterating the candidate list. An interface can be
-> configured while the destination stays unreachable, which is the case the
-> Windows family reserve covers and Berkeley still does not.
-
-The measurements above are what that reads like on a real host.
+This is sequential candidate fallback, not a shared family budget or Happy
+Eyeballs race. The opt-in IPv6 setting controls hostname resolution: disabled
+uses `AF_INET`, enabled uses `AF_UNSPEC`, and an explicit IPv6 literal uses
+`AF_UNSPEC` even when opt-in is disabled.
 
 ## Note on running the unit tests here
 
-`host_utils_ut` and the other `umock_c` suites do not build with GCC 13: the
-vendored `testtools/umock-c/src/umocktypes_charptr.c` trips
-`-Werror=stringop-overread`, and umock-c appends `-Werror` itself so a
-`-Wno-error` on the command line does not take effect. This is pre-existing and
-unrelated to the IPv6 changes, but it does mean the unit suites could not be
-run on the validation hosts.
+The Berkeley unit suite covers the opt-in resolver family, explicit IPv6
+literals, IPv4 fallback, per-address grants, refusal, cleanup, and
+`IPV6_V6ONLY`. The Windows suite covers the corresponding candidate and
+timeout behavior.
