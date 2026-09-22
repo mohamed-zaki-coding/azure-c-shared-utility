@@ -43,6 +43,7 @@
 #include "azure_c_shared_utility/xlogging.h"
 #include "azure_c_shared_utility/const_defines.h"
 #include "azure_c_shared_utility/safe_math.h"
+#include "host_utils.h"
 #include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -616,16 +617,6 @@ void socketio_destroy(CONCRETE_IO_HANDLE socket_io)
     }
 }
 
-// An IPv6 literal is an explicit request for a specific address, so it is
-// honoured even when the IPv6 opt-in is off - that opt-in governs how
-// hostnames are resolved, not whether an address the caller supplied is
-// usable. A colon cannot appear in a DNS name or an IPv4 literal, which is
-// the same test host_utils.c uses.
-static int hostname_is_ipv6_literal(const char* hostname)
-{
-    return ((hostname != NULL) && (strchr(hostname, ':') != NULL)) ? 1 : 0;
-}
-
 // Rejects a resolved address that cannot safely be handed to socket() and
 // connect(). The caller skips it and moves on to the next candidate.
 static int validate_addrinfo(const struct addrinfo* address, const char* hostname, int* error_code)
@@ -665,156 +656,141 @@ static int validate_addrinfo(const struct addrinfo* address, const char* hostnam
 
 static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, const struct addrinfo* address, int timeout_ms, int* error_code)
 {
-    int result;
+    // Every branch below is a failure except the two that reach result = 0, and
+    // the cleanup at the end keys off result, so default to failure.
+    int result = __FAILURE__;
     int connect_result;
     int flags;
     char resolved_ip[INET6_ADDRSTRLEN] = { 0 };
     const void* resolved_address = NULL;
 
-    if ((address == NULL) || (address->ai_addr == NULL))
+    socket_io_instance->socket = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
+    if (socket_io_instance->socket < SOCKET_SUCCESS)
+    {
+        *error_code = errno;
+        LogError("Failure: socket create failure %d (%s).", *error_code, strerror(*error_code));
+    }
+#ifndef __APPLE__
+    else if (socket_io_instance->target_mac_address != NULL &&
+        set_target_network_interface(socket_io_instance->socket, socket_io_instance->target_mac_address) != 0)
     {
         *error_code = __FAILURE__;
-        LogError("Failure: DNS resolution returned an invalid address.");
-        result = __FAILURE__;
+        LogError("Failure: failed selecting target network interface (MACADDR=%s).", socket_io_instance->target_mac_address);
+    }
+#endif //__APPLE__
+    else if ((-1 == (flags = fcntl(socket_io_instance->socket, F_GETFL, 0))) ||
+        (fcntl(socket_io_instance->socket, F_SETFL, flags | O_NONBLOCK) == -1))
+    {
+        *error_code = errno;
+        LogError("Failure: fcntl failure %d (%s).", *error_code, strerror(*error_code));
     }
     else
     {
-        socket_io_instance->socket = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
-        if (socket_io_instance->socket < SOCKET_SUCCESS)
+        if (address->ai_family == AF_INET)
         {
-            *error_code = errno;
-            LogError("Failure: socket create failure %d (%s).", *error_code, strerror(*error_code));
-            result = __FAILURE__;
+            resolved_address = &((const struct sockaddr_in*)address->ai_addr)->sin_addr;
         }
-#ifndef __APPLE__
-        else if (socket_io_instance->target_mac_address != NULL &&
-            set_target_network_interface(socket_io_instance->socket, socket_io_instance->target_mac_address) != 0)
+        else if (address->ai_family == AF_INET6)
         {
-            *error_code = __FAILURE__;
-            LogError("Failure: failed selecting target network interface (MACADDR=%s).", socket_io_instance->target_mac_address);
-            result = __FAILURE__;
+            resolved_address = &((const struct sockaddr_in6*)address->ai_addr)->sin6_addr;
         }
-#endif //__APPLE__
-        else if ((-1 == (flags = fcntl(socket_io_instance->socket, F_GETFL, 0))) ||
-            (fcntl(socket_io_instance->socket, F_SETFL, flags | O_NONBLOCK) == -1))
+
+        // An IPv4-mapped destination such as ::ffff:203.0.113.1 resolves to
+        // AF_INET6 and can only be reached from a dual-stack socket. Linux
+        // already allows this by default (net.ipv6.bindv6only=0), but the
+        // sysctl can be flipped, so set it explicitly and stay aligned with
+        // the Windows adapter. Not fatal: a failure here only means a mapped
+        // destination may be refused later.
+        if (address->ai_family == AF_INET6)
         {
-            *error_code = errno;
-            LogError("Failure: fcntl failure %d (%s).", *error_code, strerror(*error_code));
-            result = __FAILURE__;
+            int v6only = 0;
+            if (setsockopt(socket_io_instance->socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                &v6only, sizeof(v6only)) != 0)
+            {
+                LogInfo("Could not clear IPV6_V6ONLY (%d) for %s; IPv4-mapped destinations may be refused.",
+                    errno, socket_io_instance->hostname);
+            }
+        }
+
+        if ((resolved_address != NULL) &&
+            (inet_ntop(address->ai_family, resolved_address, resolved_ip, sizeof(resolved_ip)) != NULL))
+        {
+            LogInfo("DNS resolved %s to %s, connecting to %s:%d (socket fd=%d)",
+                socket_io_instance->hostname, resolved_ip, socket_io_instance->hostname,
+                socket_io_instance->port, socket_io_instance->socket);
         }
         else
         {
-            if (address->ai_family == AF_INET)
-            {
-                resolved_address = &((const struct sockaddr_in*)address->ai_addr)->sin_addr;
-            }
-            else if (address->ai_family == AF_INET6)
-            {
-                resolved_address = &((const struct sockaddr_in6*)address->ai_addr)->sin6_addr;
-            }
+            LogInfo("DNS resolved successfully, connecting to %s:%d (socket fd=%d)",
+                socket_io_instance->hostname, socket_io_instance->port, socket_io_instance->socket);
+        }
 
-            // An IPv4-mapped destination such as ::ffff:203.0.113.1 resolves to
-            // AF_INET6 and can only be reached from a dual-stack socket. Linux
-            // already allows this by default (net.ipv6.bindv6only=0), but the
-            // sysctl can be flipped, so set it explicitly and stay aligned with
-            // the Windows adapter. Not fatal: a failure here only means a mapped
-            // destination may be refused later.
-            if (address->ai_family == AF_INET6)
+        connect_result = connect(socket_io_instance->socket, address->ai_addr, address->ai_addrlen);
+        if ((connect_result != 0) && (errno != EINPROGRESS))
+        {
+            *error_code = errno;
+            LogError("Failure: connect to %s:%d failed with error %d (%s).",
+                socket_io_instance->hostname, socket_io_instance->port, *error_code, strerror(*error_code));
+        }
+        else if (connect_result != 0)
+        {
+            int poll_result;
+            int poll_error = 0;
+            struct pollfd fd = { 0 };
+            fd.fd = socket_io_instance->socket;
+            fd.events = POLLOUT;
+
+            LogInfo("Connect in progress (EINPROGRESS), waiting up to %d milliseconds for %s:%d",
+                timeout_ms, socket_io_instance->hostname, socket_io_instance->port);
+
+            do
             {
-                int v6only = 0;
-                if (setsockopt(socket_io_instance->socket, IPPROTO_IPV6, IPV6_V6ONLY,
-                    &v6only, sizeof(v6only)) != 0)
+                poll_result = poll(&fd, 1, timeout_ms);
+                if (poll_result < 0)
                 {
-                    LogInfo("Could not clear IPV6_V6ONLY (%d) for %s; IPv4-mapped destinations may be refused.",
-                        errno, socket_io_instance->hostname);
+                    poll_error = errno;
                 }
-            }
+            } while ((poll_result < 0) && (poll_error == EINTR));
 
-            if ((resolved_address != NULL) &&
-                (inet_ntop(address->ai_family, resolved_address, resolved_ip, sizeof(resolved_ip)) != NULL))
+            if (poll_result == 0)
             {
-                LogInfo("DNS resolved %s to %s, connecting to %s:%d (socket fd=%d)",
-                    socket_io_instance->hostname, resolved_ip, socket_io_instance->hostname,
-                    socket_io_instance->port, socket_io_instance->socket);
+                *error_code = SOCKETIO_POLL_TIMEOUT_ERROR;
+                LogError("Failure: connection timed out after %d milliseconds waiting for %s:%d.",
+                    timeout_ms, socket_io_instance->hostname, socket_io_instance->port);
+            }
+            else if (poll_result < 0)
+            {
+                *error_code = poll_error;
+                LogError("Failure: poll failure, retval %d, errno %d (%s).",
+                    poll_result, poll_error, strerror(poll_error));
             }
             else
             {
-                LogInfo("DNS resolved successfully, connecting to %s:%d (socket fd=%d)",
-                    socket_io_instance->hostname, socket_io_instance->port, socket_io_instance->socket);
-            }
+                int socket_error = 0;
+                socklen_t socket_error_length = sizeof(socket_error);
 
-            connect_result = connect(socket_io_instance->socket, address->ai_addr, address->ai_addrlen);
-            if ((connect_result != 0) && (errno != EINPROGRESS))
-            {
-                *error_code = errno;
-                LogError("Failure: connect to %s:%d failed with error %d (%s).",
-                    socket_io_instance->hostname, socket_io_instance->port, *error_code, strerror(*error_code));
-                result = __FAILURE__;
-            }
-            else if (connect_result != 0)
-            {
-                int poll_result;
-                int poll_error = 0;
-                struct pollfd fd = { 0 };
-                fd.fd = socket_io_instance->socket;
-                fd.events = POLLOUT;
-
-                LogInfo("Connect in progress (EINPROGRESS), waiting up to %d milliseconds for %s:%d",
-                    timeout_ms, socket_io_instance->hostname, socket_io_instance->port);
-
-                do
+                if (getsockopt(socket_io_instance->socket, SOL_SOCKET, SO_ERROR,
+                    &socket_error, &socket_error_length) != 0)
                 {
-                    poll_result = poll(&fd, 1, timeout_ms);
-                    if (poll_result < 0)
-                    {
-                        poll_error = errno;
-                    }
-                } while ((poll_result < 0) && (poll_error == EINTR));
-
-                if (poll_result == 0)
-                {
-                    *error_code = SOCKETIO_POLL_TIMEOUT_ERROR;
-                    LogError("Failure: connection timed out after %d milliseconds waiting for %s:%d.",
-                        timeout_ms, socket_io_instance->hostname, socket_io_instance->port);
-                    result = __FAILURE__;
+                    *error_code = errno;
+                    LogError("Failure: getsockopt failure %d (%s).", *error_code, strerror(*error_code));
                 }
-                else if (poll_result < 0)
+                else if (socket_error != 0)
                 {
-                    *error_code = poll_error;
-                    LogError("Failure: poll failure, retval %d, errno %d (%s).",
-                        poll_result, poll_error, strerror(poll_error));
-                    result = __FAILURE__;
+                    *error_code = socket_error;
+                    LogError("Failure: connect to %s:%d failed with error %d (%s).",
+                        socket_io_instance->hostname, socket_io_instance->port,
+                        socket_error, strerror(socket_error));
                 }
                 else
                 {
-                    int socket_error = 0;
-                    socklen_t socket_error_length = sizeof(socket_error);
-
-                    if (getsockopt(socket_io_instance->socket, SOL_SOCKET, SO_ERROR,
-                        &socket_error, &socket_error_length) != 0)
-                    {
-                        *error_code = errno;
-                        LogError("Failure: getsockopt failure %d (%s).", *error_code, strerror(*error_code));
-                        result = __FAILURE__;
-                    }
-                    else if (socket_error != 0)
-                    {
-                        *error_code = socket_error;
-                        LogError("Failure: connect to %s:%d failed with error %d (%s).",
-                            socket_io_instance->hostname, socket_io_instance->port,
-                            socket_error, strerror(socket_error));
-                        result = __FAILURE__;
-                    }
-                    else
-                    {
-                        result = 0;
-                    }
+                    result = 0;
                 }
             }
-            else
-            {
-                result = 0;
-            }
+        }
+        else
+        {
+            result = 0;
         }
     }
 
@@ -883,9 +859,13 @@ int socketio_open(CONCRETE_IO_HANDLE socket_io, ON_IO_OPEN_COMPLETE on_io_open_c
             {
                 struct addrinfo addrHint = { 0 };
                 // AF_UNSPEC asks for A and AAAA; AF_INET restores the IPv4-only
-                // lookup this adapter did before IPv6 support was added.
+                // lookup this adapter did before IPv6 support was added. An IPv6
+                // literal is an explicit request for a specific address, so it is
+                // honoured even when the opt-in is off - the opt-in governs how
+                // hostnames are resolved, not whether an address the caller
+                // supplied is usable.
                 addrHint.ai_family = ((socket_io_instance->enable_ipv6 != 0) ||
-                    hostname_is_ipv6_literal(socket_io_instance->hostname)) ? AF_UNSPEC : AF_INET;
+                    host_is_ipv6_literal(socket_io_instance->hostname)) ? AF_UNSPEC : AF_INET;
                 addrHint.ai_socktype = SOCK_STREAM;
                 addrHint.ai_protocol = 0;
                 // ai_flags is deliberately left clear. AI_ADDRCONFIG suppresses AAAA

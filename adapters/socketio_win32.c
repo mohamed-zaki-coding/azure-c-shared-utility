@@ -18,6 +18,7 @@
 #include "azure_c_shared_utility/optimize_size.h"
 #include "azure_c_shared_utility/xlogging.h"
 #include "azure_c_shared_utility/safe_math.h"
+#include "host_utils.h"
 
 // Time allowed for a connect attempt against a single resolved address. There
 // is no budget shared across addresses: each candidate gets this in full, so a
@@ -265,16 +266,6 @@ void socketio_destroy(CONCRETE_IO_HANDLE socket_io)
     }
 }
 
-// An IPv6 literal is an explicit request for a specific address, so it is
-// honoured even when the IPv6 opt-in is off - that opt-in governs how
-// hostnames are resolved, not whether an address the caller supplied is
-// usable. A colon cannot appear in a DNS name or an IPv4 literal, which is
-// the same test host_utils.c uses.
-static int hostname_is_ipv6_literal(const char* hostname)
-{
-    return ((hostname != NULL) && (strchr(hostname, ':') != NULL)) ? 1 : 0;
-}
-
 // Rejects a resolved address that cannot safely be handed to socket() and
 // connect(). The caller skips it and moves on to the next candidate.
 static int validate_addrinfo(const ADDRINFO* addr, const char* hostname, int* error_code)
@@ -324,7 +315,9 @@ static int validate_addrinfo(const ADDRINFO* addr, const char* hostname, int* er
 // sets it to INVALID_SOCKET, and records the Winsock error in *error_code.
 static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, ADDRINFO* addr, int timeout_ms, int* error_code)
 {
-    int result;
+    // Every branch below is a failure except the two that reach result = 0, and
+    // the cleanup at the end keys off result, so default to failure.
+    int result = __FAILURE__;
     const char* hostname = (socket_io_instance->hostname != NULL) ? socket_io_instance->hostname : "<unknown>";
 
     socket_io_instance->socket = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
@@ -332,7 +325,6 @@ static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, ADDRINFO*
     {
         *error_code = WSAGetLastError();
         LogError("Failure: socket create failure %d for %s.", *error_code, hostname);
-        result = __FAILURE__;
     }
     else
     {
@@ -359,7 +351,6 @@ static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, ADDRINFO*
         {
             *error_code = WSAGetLastError();
             LogError("Failure: ioctlsocket failure %d for %s:%d.", *error_code, hostname, socket_io_instance->port);
-            result = __FAILURE__;
         }
         else
         {
@@ -398,7 +389,6 @@ static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, ADDRINFO*
                 {
                     *error_code = connect_error;
                     LogError("Failure: connect to %s:%d failed with error %d.", hostname, socket_io_instance->port, *error_code);
-                    result = __FAILURE__;
                 }
                 else
                 {
@@ -421,14 +411,12 @@ static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, ADDRINFO*
                         *error_code = WSAETIMEDOUT;
                         LogError("Failure: connection timed out after %d milliseconds waiting for %s:%d.",
                             timeout_ms, hostname, socket_io_instance->port);
-                        result = __FAILURE__;
                     }
                     else if (select_result == SOCKET_ERROR)
                     {
                         *error_code = WSAGetLastError();
                         LogError("Failure: select failed with error %d for %s:%d.",
                             *error_code, hostname, socket_io_instance->port);
-                        result = __FAILURE__;
                     }
                     else
                     {
@@ -440,14 +428,12 @@ static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, ADDRINFO*
                             *error_code = WSAGetLastError();
                             LogError("Failure: getsockopt failed with error %d for %s:%d.",
                                 *error_code, hostname, socket_io_instance->port);
-                            result = __FAILURE__;
                         }
                         else if (socket_error != 0)
                         {
                             *error_code = socket_error;
                             LogError("Failure: connect to %s:%d failed with error %d.",
                                 hostname, socket_io_instance->port, *error_code);
-                            result = __FAILURE__;
                         }
                         else
                         {
@@ -520,9 +506,13 @@ int socketio_open(CONCRETE_IO_HANDLE socket_io, ON_IO_OPEN_COMPLETE on_io_open_c
             ADDRINFO* addrInfo = NULL;
 
             // AF_UNSPEC asks for A and AAAA; AF_INET restores the IPv4-only
-            // lookup this adapter did before IPv6 support was added.
+            // lookup this adapter did before IPv6 support was added. An IPv6
+            // literal is an explicit request for a specific address, so it is
+            // honoured even when the opt-in is off - the opt-in governs how
+            // hostnames are resolved, not whether an address the caller
+            // supplied is usable.
             addrHint.ai_family = ((socket_io_instance->enable_ipv6 != 0) ||
-                hostname_is_ipv6_literal(socket_io_instance->hostname)) ? AF_UNSPEC : AF_INET;
+                host_is_ipv6_literal(socket_io_instance->hostname)) ? AF_UNSPEC : AF_INET;
             addrHint.ai_socktype = SOCK_STREAM;
             addrHint.ai_protocol = 0;
             // ai_flags is deliberately left clear, matching socketio_berkeley.c.

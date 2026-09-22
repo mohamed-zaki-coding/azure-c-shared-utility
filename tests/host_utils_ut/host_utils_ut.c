@@ -121,4 +121,23 @@ TEST_FUNCTION(null_arguments_fail)
     ASSERT_NOT_EQUAL(int, 0, format_host_for_authority("a", NULL, sizeof(output)));
 }
 
+/* The socketio adapters use this to decide whether to resolve AF_UNSPEC even
+   when the IPv6 opt-in is off, so it has to agree with the bracketing above:
+   anything reported as a literal here is a host the adapters will hand
+   straight to getaddrinfo. */
+TEST_FUNCTION(only_an_ipv6_host_is_reported_as_an_ipv6_literal)
+{
+    // act, assert
+    ASSERT_EQUAL(int, 0, host_is_ipv6_literal("example.azure-devices.net"));
+    ASSERT_EQUAL(int, 0, host_is_ipv6_literal("192.168.0.1"));
+    ASSERT_EQUAL(int, 0, host_is_ipv6_literal(""));
+    ASSERT_EQUAL(int, 0, host_is_ipv6_literal(NULL));
+
+    ASSERT_EQUAL(int, 1, host_is_ipv6_literal("2001:db8::1"));
+    ASSERT_EQUAL(int, 1, host_is_ipv6_literal("::1"));
+    ASSERT_EQUAL(int, 1, host_is_ipv6_literal("[::1]"));
+    ASSERT_EQUAL(int, 1, host_is_ipv6_literal("fe80::1%eth0"));
+    ASSERT_EQUAL(int, 1, host_is_ipv6_literal("::ffff:127.0.0.1"));
+}
+
 END_TEST_SUITE(host_utils_ut)
