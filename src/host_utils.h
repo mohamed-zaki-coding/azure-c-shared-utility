@@ -21,6 +21,10 @@ on the sending host.
     "192.0.2.1"         -> "192.0.2.1"
     "2001:db8::1"       -> "[2001:db8::1]"
     "fe80::1%eth0"      -> "[fe80::1]"
+
+Used by uws_client.c for the WebSocket Host header, and by http_proxy_io.c for
+the CONNECT request-target and its Host header. host_is_ipv6_literal is also
+used by socketio_berkeley.c and socketio_win32.c to decide the resolver family.
 */
 
 /// Returns 1 if the host is an IPv6 literal rather than a DNS name or an IPv4

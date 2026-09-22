@@ -454,6 +454,8 @@ static int set_target_network_interface(int target_socket, char* mac_address)
     int enumeration_socket;
     NETWORK_INTERFACE_DESCRIPTION* nid;
 
+    // SIOCGIFCONF only works on an AF_INET socket, and the connect socket may now
+    // be AF_INET6, so enumerate on a throwaway IPv4 socket instead.
     enumeration_socket = socket(AF_INET, SOCK_DGRAM, 0);
     if (enumeration_socket < SOCKET_SUCCESS)
     {
