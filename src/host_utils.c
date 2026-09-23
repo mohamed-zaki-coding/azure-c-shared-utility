@@ -72,23 +72,6 @@ static int get_authority_host_info(const char* host, AUTHORITY_HOST_INFO* info)
     return result;
 }
 
-int host_is_ipv6_literal(const char* host)
-{
-    AUTHORITY_HOST_INFO info;
-    int result;
-
-    if (get_authority_host_info(host, &info) != 0)
-    {
-        result = 0;
-    }
-    else
-    {
-        result = info.is_ipv6;
-    }
-
-    return result;
-}
-
 size_t authority_host_length(const char* host)
 {
     AUTHORITY_HOST_INFO info;

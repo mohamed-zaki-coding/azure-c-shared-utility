@@ -57,9 +57,9 @@ host=::ffff:127.0.0.1   port=9     result=OPEN_ERROR code=111  elapsed_ms=0
 ```
 
 `110` is `ETIMEDOUT`, `111` is `ECONNREFUSED`. The blackholes stop at exactly
-`CONNECT_TIMEOUT_MS`, which matches what `socketio_win32.c` now does - Windows
-measured 10002 ms against 21075 ms for a plain blocking connect to the same
-address. The bound is at parity across the two adapters.
+`CONNECT_TIMEOUT_PER_ADDRESS_MS`, which matches what `socketio_win32.c` now
+does - Windows measured 10002 ms against 21075 ms for a plain blocking connect
+to the same address. The bound is at parity across the two adapters.
 
 `::ffff:127.0.0.1` is *accepted* here and reaches the IPv4 stack: against a port
 with a listener it returns `OPEN_OK`. Both adapters now clear `IPV6_V6ONLY` for
@@ -73,18 +73,17 @@ Preferred family blackholed, with a reachable IPv4 candidate behind it:
 | 2 | `OPEN_OK` after about 20000 ms | yes |
 | 3 | `OPEN_OK` after about 30000 ms | yes |
 
-Every candidate receives the full `CONNECT_TIMEOUT_MS` grant. The total can
-therefore grow to approximately the number of timed-out candidates multiplied
-by 10 seconds before a later healthy candidate succeeds.
+Every candidate receives the full `CONNECT_TIMEOUT_PER_ADDRESS_MS` grant. The
+total can therefore grow to approximately the number of timed-out candidates
+multiplied by 10 seconds before a later healthy candidate succeeds.
 
 This is sequential candidate fallback, not a shared family budget or Happy
 Eyeballs race. The opt-in IPv6 setting controls hostname resolution: disabled
-uses `AF_INET`, enabled uses `AF_UNSPEC`, and an explicit IPv6 literal uses
-`AF_UNSPEC` even when opt-in is disabled.
+uses `AF_INET` for every host form, including an explicit IPv6 literal, and
+enabled uses `AF_UNSPEC`.
 
 ## Note on running the unit tests here
 
-The Berkeley unit suite covers the opt-in resolver family, explicit IPv6
-literals, IPv4 fallback, per-address grants, refusal, cleanup, and
-`IPV6_V6ONLY`. The Windows suite covers the corresponding candidate and
-timeout behavior.
+The Berkeley and Windows unit suites cover the opt-in resolver family,
+including explicit IPv6 literals. They also cover IPv4 fallback, per-address
+grants, refusal, cleanup, and `IPV6_V6ONLY` where applicable.

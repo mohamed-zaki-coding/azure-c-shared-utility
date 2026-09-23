@@ -23,15 +23,8 @@ on the sending host.
     "fe80::1%eth0"      -> "[fe80::1]"
 
 Used by uws_client.c for the WebSocket Host header, and by http_proxy_io.c for
-the CONNECT request-target and its Host header. host_is_ipv6_literal is also
-used by socketio_berkeley.c and socketio_win32.c to decide the resolver family.
+the CONNECT request-target and its Host header.
 */
-
-/// Returns 1 if the host is an IPv6 literal rather than a DNS name or an IPv4
-/// literal, 0 otherwise (including for NULL). A colon cannot appear in either
-/// of the other two forms, so its presence is the whole test. Brackets and a
-/// zone ID are both accepted, so "::1", "[::1]" and "fe80::1%eth0" all report 1.
-int host_is_ipv6_literal(const char* host);
 
 /// Length of the formatted authority host, excluding the null terminator.
 /// Returns 0 if the host cannot be formatted.

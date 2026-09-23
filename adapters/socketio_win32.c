@@ -18,12 +18,11 @@
 #include "azure_c_shared_utility/optimize_size.h"
 #include "azure_c_shared_utility/xlogging.h"
 #include "azure_c_shared_utility/safe_math.h"
-#include "host_utils.h"
 
 // Time allowed for a connect attempt against a single resolved address. There
 // is no budget shared across addresses: each candidate gets this in full, so a
 // blackholed address cannot deny the ones behind it their attempt.
-#define CONNECT_TIMEOUT_MS 10000
+#define CONNECT_TIMEOUT_PER_ADDRESS_MS 10000
 
 typedef enum IO_STATE_TAG
 {
@@ -61,32 +60,66 @@ typedef struct SOCKET_IO_INSTANCE_TAG
 /*this function will clone an option given by name and value*/
 static void* socketio_CloneOption(const char* name, const void* value)
 {
-    (void)name;
-    (void)value;
-    return NULL;
+    void* result = NULL;
+
+    if ((name == NULL) || (value == NULL))
+    {
+        LogError("Failed cloning option (name or value is NULL)");
+    }
+    else if (strcmp(name, OPTION_ENABLE_IPV6) == 0)
+    {
+        result = malloc(sizeof(int));
+        if (result == NULL)
+        {
+            LogError("Failed cloning option %s (malloc failed)", name);
+        }
+        else
+        {
+            *(int*)result = *(const int*)value;
+        }
+    }
+    else
+    {
+        LogError("Cannot clone option %s (not supported)", name);
+    }
+
+    return result;
 }
 
 /*this function destroys an option previously created*/
 static void socketio_DestroyOption(const char* name, const void* value)
 {
-    (void)name;
-    (void)value;
+    if ((name != NULL) && (strcmp(name, OPTION_ENABLE_IPV6) == 0) && (value != NULL))
+    {
+        free((void*)value);
+    }
 }
 
 static OPTIONHANDLER_HANDLE socketio_retrieveoptions(CONCRETE_IO_HANDLE handle)
 {
     OPTIONHANDLER_HANDLE result;
-    (void)handle;
-    result = OptionHandler_Create(socketio_CloneOption, socketio_DestroyOption, socketio_setoption);
-    if (result == NULL)
+    if (handle == NULL)
     {
-        LogError("unable to OptionHandler_Create");
-        /*return as is*/
+        LogError("failed retrieving options (handle is NULL)");
+        result = NULL;
     }
     else
     {
-        /*insert here work to add the options to "result" handle*/
+        SOCKET_IO_INSTANCE* socket_io_instance = (SOCKET_IO_INSTANCE*)handle;
+
+        result = OptionHandler_Create(socketio_CloneOption, socketio_DestroyOption, socketio_setoption);
+        if (result == NULL)
+        {
+            LogError("unable to OptionHandler_Create");
+        }
+        else if (OptionHandler_AddOption(result, OPTION_ENABLE_IPV6, &socket_io_instance->enable_ipv6) != OPTIONHANDLER_OK)
+        {
+            LogError("failed retrieving options (failed adding enable_ipv6)");
+            OptionHandler_Destroy(result);
+            result = NULL;
+        }
     }
+
     return result;
 }
 
@@ -506,13 +539,9 @@ int socketio_open(CONCRETE_IO_HANDLE socket_io, ON_IO_OPEN_COMPLETE on_io_open_c
             ADDRINFO* addrInfo = NULL;
 
             // AF_UNSPEC asks for A and AAAA; AF_INET restores the IPv4-only
-            // lookup this adapter did before IPv6 support was added. An IPv6
-            // literal is an explicit request for a specific address, so it is
-            // honoured even when the opt-in is off - the opt-in governs how
-            // hostnames are resolved, not whether an address the caller
-            // supplied is usable.
-            addrHint.ai_family = ((socket_io_instance->enable_ipv6 != 0) ||
-                host_is_ipv6_literal(socket_io_instance->hostname)) ? AF_UNSPEC : AF_INET;
+            // lookup this adapter did before IPv6 support was added. Apply
+            // the opt-in to every host form, including IPv6 literals.
+            addrHint.ai_family = (socket_io_instance->enable_ipv6 != 0) ? AF_UNSPEC : AF_INET;
             addrHint.ai_socktype = SOCK_STREAM;
             addrHint.ai_protocol = 0;
             // ai_flags is deliberately left clear, matching socketio_berkeley.c.
@@ -548,7 +577,7 @@ int socketio_open(CONCRETE_IO_HANDLE socket_io, ON_IO_OPEN_COMPLETE on_io_open_c
                     // leave the other family - often the only one that works -
                     // unattempted. The cost is that the worst case grows with
                     // the number of resolved addresses rather than being capped.
-                    if (connect_to_addrinfo(socket_io_instance, rp, CONNECT_TIMEOUT_MS, &connect_error) == 0)
+                    if (connect_to_addrinfo(socket_io_instance, rp, CONNECT_TIMEOUT_PER_ADDRESS_MS, &connect_error) == 0)
                     {
                         result = 0;
                         break;

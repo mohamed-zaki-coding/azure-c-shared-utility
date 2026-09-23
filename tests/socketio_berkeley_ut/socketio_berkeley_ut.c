@@ -113,6 +113,9 @@ static size_t g_v6only_cleared_count;
 static int g_v6only_last_value;
 static int g_last_addrinfo_family;
 static int g_last_addrinfo_flags;
+static int g_retrieved_enable_ipv6;
+static pfCloneOption g_retrieved_clone_option;
+static pfDestroyOption g_retrieved_destroy_option;
 
 static IO_OPEN_RESULT_DETAILED g_open_result;
 
@@ -331,6 +334,24 @@ static void test_on_io_error(void* context)
     (void)context;
 }
 
+static OPTIONHANDLER_HANDLE test_OptionHandler_Create(pfCloneOption cloneOption, pfDestroyOption destroyOption, pfSetOption setOption)
+{
+    (void)setOption;
+    g_retrieved_clone_option = cloneOption;
+    g_retrieved_destroy_option = destroyOption;
+    return (OPTIONHANDLER_HANDLE)0x4243;
+}
+
+static OPTIONHANDLER_RESULT test_OptionHandler_AddOption(OPTIONHANDLER_HANDLE handle, const char* name, const void* value)
+{
+    (void)handle;
+    if ((name != NULL) && (value != NULL) && (strcmp(name, OPTION_ENABLE_IPV6) == 0))
+    {
+        g_retrieved_enable_ipv6 = *(const int*)value;
+    }
+    return OPTIONHANDLER_OK;
+}
+
 static void on_umock_c_error(UMOCK_C_ERROR_CODE error_code)
 {
     char temp_str[256];
@@ -380,6 +401,10 @@ TEST_SUITE_INITIALIZE(suite_init)
     REGISTER_UMOCK_ALIAS_TYPE(LIST_MATCH_FUNCTION, void*);
     REGISTER_UMOCK_ALIAS_TYPE(LIST_ACTION_FUNCTION, void*);
     REGISTER_UMOCK_ALIAS_TYPE(LIST_CONDITION_FUNCTION, void*);
+    REGISTER_UMOCK_ALIAS_TYPE(OPTIONHANDLER_HANDLE, void*);
+    REGISTER_UMOCK_ALIAS_TYPE(pfCloneOption, void*);
+    REGISTER_UMOCK_ALIAS_TYPE(pfDestroyOption, void*);
+    REGISTER_UMOCK_ALIAS_TYPE(pfSetOption, void*);
     REGISTER_UMOCK_ALIAS_TYPE(socklen_t, unsigned int);
     REGISTER_UMOCK_ALIAS_TYPE(nfds_t, unsigned long);
     // Every pointer argument that appears in a mock needs a registered type, or
@@ -404,6 +429,8 @@ TEST_SUITE_INITIALIZE(suite_init)
     REGISTER_GLOBAL_MOCK_HOOK(singlylinkedlist_item_get_value, my_singlylinkedlist_item_get_value);
     REGISTER_GLOBAL_MOCK_HOOK(singlylinkedlist_find, my_singlylinkedlist_find);
     REGISTER_GLOBAL_MOCK_HOOK(singlylinkedlist_destroy, my_singlylinkedlist_destroy);
+    REGISTER_GLOBAL_MOCK_HOOK(OptionHandler_Create, test_OptionHandler_Create);
+    REGISTER_GLOBAL_MOCK_HOOK(OptionHandler_AddOption, test_OptionHandler_AddOption);
 }
 
 TEST_SUITE_CLEANUP(suite_cleanup)
@@ -434,6 +461,9 @@ TEST_FUNCTION_INITIALIZE(method_init)
     g_v6only_last_value = -1;
     g_last_addrinfo_family = -1;
     g_last_addrinfo_flags = -1;
+    g_retrieved_enable_ipv6 = -1;
+    g_retrieved_clone_option = NULL;
+    g_retrieved_destroy_option = NULL;
     list_item_count = 0;
     singlylinkedlist_add_called = false;
     g_open_result.result = IO_OPEN_CANCELLED;
@@ -658,6 +688,25 @@ TEST_FUNCTION(socketio_open_without_ipv6_opt_in_requests_ipv4_only)
     socketio_destroy(ioHandle);
 }
 
+TEST_FUNCTION(socketio_retrieveoptions_preserves_ipv6_opt_in)
+{
+    CONCRETE_IO_HANDLE ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    OPTIONHANDLER_HANDLE options = socketio_get_interface_description()->concrete_io_retrieveoptions(ioHandle);
+    int* cloned_value;
+
+    ASSERT_ARE_EQUAL(void_ptr, (OPTIONHANDLER_HANDLE)0x4243, options);
+    ASSERT_ARE_EQUAL(int, 1, g_retrieved_enable_ipv6);
+    ASSERT_IS_NOT_NULL(g_retrieved_clone_option);
+    ASSERT_IS_NOT_NULL(g_retrieved_destroy_option);
+
+    cloned_value = (int*)g_retrieved_clone_option(OPTION_ENABLE_IPV6, &g_retrieved_enable_ipv6);
+    ASSERT_IS_NOT_NULL(cloned_value);
+    ASSERT_ARE_EQUAL(int, 1, *cloned_value);
+    g_retrieved_destroy_option(OPTION_ENABLE_IPV6, cloned_value);
+
+    socketio_destroy(ioHandle);
+}
+
 TEST_FUNCTION(socketio_open_with_ipv6_opt_in_requests_both_families)
 {
     const int families[] = { AF_INET6, AF_INET };
@@ -678,9 +727,9 @@ TEST_FUNCTION(socketio_open_with_ipv6_opt_in_requests_both_families)
     socketio_destroy(ioHandle);
 }
 
-TEST_FUNCTION(socketio_open_ipv6_literal_requests_both_families_without_opt_in)
+TEST_FUNCTION(socketio_open_ipv6_literal_without_opt_in_requests_ipv4_only)
 {
-    const int families[] = { AF_INET6 };
+    const int families[] = { AF_INET };
     const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
     CONCRETE_IO_HANDLE ioHandle;
 
@@ -689,9 +738,9 @@ TEST_FUNCTION(socketio_open_ipv6_literal_requests_both_families_without_opt_in)
 
     (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
 
-    ASSERT_ARE_EQUAL(int, AF_UNSPEC, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, AF_INET, g_last_addrinfo_family);
     ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
-    ASSERT_ARE_EQUAL(int, AF_INET6, g_connect_families[0]);
+    ASSERT_ARE_EQUAL(int, AF_INET, g_connect_families[0]);
 
     socketio_destroy(ioHandle);
 }

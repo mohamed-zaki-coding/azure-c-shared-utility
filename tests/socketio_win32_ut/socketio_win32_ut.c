@@ -53,6 +53,7 @@ void my_gballoc_free(void* ptr)
 #undef ENABLE_MOCKS
 
 #include "azure_c_shared_utility/optimize_size.h"
+#include "azure_c_shared_utility/shared_util_options.h"
 #include "azure_c_shared_utility/socketio.h"
 
 #define ENABLE_MOCKS
@@ -66,7 +67,11 @@ static bool g_addrinfo_two_addresses;
    candidate - the ordering a real resolver commonly returns for a dual-stack
    host. */
 static bool g_addrinfo_dual_stack;
+static int g_last_addrinfo_family;
 static int g_last_select_timeout_ms;
+static int g_retrieved_enable_ipv6;
+static pfCloneOption g_retrieved_clone_option;
+static pfDestroyOption g_retrieved_destroy_option;
 /* Records the address family of every connect() attempt, so a test can assert
    which families were actually tried and in what order. */
 #define MAX_RECORDED_CONNECTS 8
@@ -103,6 +108,24 @@ static const char* TEST_BUFFER_VALUE = "test_buffer_value";
 static struct tcp_keepalive persisted_tcp_keepalive;
 typedef char* SOCKET_MUTABLE_BUFFER;
 typedef const char* SOCKET_CONST_BUFFER;
+
+static OPTIONHANDLER_HANDLE test_OptionHandler_Create(pfCloneOption cloneOption, pfDestroyOption destroyOption, pfSetOption setOption)
+{
+    (void)setOption;
+    g_retrieved_clone_option = cloneOption;
+    g_retrieved_destroy_option = destroyOption;
+    return (OPTIONHANDLER_HANDLE)0x4244;
+}
+
+static OPTIONHANDLER_RESULT test_OptionHandler_AddOption(OPTIONHANDLER_HANDLE handle, const char* name, const void* value)
+{
+    (void)handle;
+    if ((name != NULL) && (value != NULL) && (strcmp(name, OPTION_ENABLE_IPV6) == 0))
+    {
+        g_retrieved_enable_ipv6 = *(const int*)value;
+    }
+    return OPTIONHANDLER_OK;
+}
 
 MOCK_FUNCTION_WITH_CODE(WSAAPI, SOCKET, socket, int, af, int, type, int, protocol)
 MOCK_FUNCTION_END(test_socket)
@@ -144,6 +167,10 @@ len = g_socket_send_size_value;
 MOCK_FUNCTION_END(len)
 MOCK_FUNCTION_WITH_CODE(WSAAPI, INT, getaddrinfo, PCSTR, pNodeName, PCSTR, pServiceName, const ADDRINFOA*, pHints, PADDRINFOA*, ppResult)
 int callFail;
+if (pHints != NULL)
+{
+    g_last_addrinfo_family = pHints->ai_family;
+}
 if (!g_addrinfo_call_fail)
 {
     *ppResult = (PADDRINFOA)malloc(sizeof(ADDRINFOA));
@@ -425,6 +452,10 @@ TEST_SUITE_INITIALIZE(suite_init)
     REGISTER_UMOCK_ALIAS_TYPE(CONCRETE_IO_HANDLE, void*);
     REGISTER_UMOCK_ALIAS_TYPE(SINGLYLINKEDLIST_HANDLE, void*);
     REGISTER_UMOCK_ALIAS_TYPE(LIST_ITEM_HANDLE, void*);
+    REGISTER_UMOCK_ALIAS_TYPE(OPTIONHANDLER_HANDLE, void*);
+    REGISTER_UMOCK_ALIAS_TYPE(pfCloneOption, void*);
+    REGISTER_UMOCK_ALIAS_TYPE(pfDestroyOption, void*);
+    REGISTER_UMOCK_ALIAS_TYPE(pfSetOption, void*);
     REGISTER_UMOCK_ALIAS_TYPE(SOCKET, void*);
     REGISTER_UMOCK_ALIAS_TYPE(INT, int);
     REGISTER_UMOCK_ALIAS_TYPE(VOID*, void*);
@@ -449,6 +480,8 @@ TEST_SUITE_INITIALIZE(suite_init)
     REGISTER_GLOBAL_MOCK_HOOK(singlylinkedlist_item_get_value, my_singlylinkedlist_item_get_value);
     REGISTER_GLOBAL_MOCK_HOOK(singlylinkedlist_find, my_singlylinkedlist_find);
     REGISTER_GLOBAL_MOCK_HOOK(singlylinkedlist_destroy, my_singlylinkedlist_destroy);
+    REGISTER_GLOBAL_MOCK_HOOK(OptionHandler_Create, test_OptionHandler_Create);
+    REGISTER_GLOBAL_MOCK_HOOK(OptionHandler_AddOption, test_OptionHandler_AddOption);
 }
 
 TEST_SUITE_CLEANUP(suite_cleanup)
@@ -475,7 +508,11 @@ TEST_FUNCTION_INITIALIZE(method_init)
     g_addrinfo_call_fail = false;
     g_addrinfo_two_addresses = false;
     g_addrinfo_dual_stack = false;
+    g_last_addrinfo_family = AF_UNSPEC;
     g_last_select_timeout_ms = 0;
+    g_retrieved_enable_ipv6 = -1;
+    g_retrieved_clone_option = NULL;
+    g_retrieved_destroy_option = NULL;
     g_connect_attempt_count = 0;
     memset(g_connect_families, 0, sizeof(g_connect_families));
     g_socket_error = 0;
@@ -605,6 +642,64 @@ TEST_FUNCTION(socketio_open_socket_io_NULL_fails)
     ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
     ASSERT_ARE_EQUAL(int, 0, result);
     ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, g_open_result.result);
+}
+
+TEST_FUNCTION(socketio_open_ipv6_literal_without_opt_in_requests_ipv4_only)
+{
+    SOCKETIO_CONFIG socketConfig = { "::1", PORT_NUM, NULL, 0 };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    g_addrinfo_call_fail = true;
+    umock_c_reset_all_calls();
+
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, &callbackContext,
+        test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+
+    ASSERT_ARE_EQUAL(int, AF_INET, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, g_open_result.result);
+    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_retrieveoptions_preserves_ipv6_opt_in)
+{
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL, 1 };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    OPTIONHANDLER_HANDLE options = socketio_get_interface_description()->concrete_io_retrieveoptions(ioHandle);
+    int* cloned_value;
+
+    ASSERT_ARE_EQUAL(void_ptr, (OPTIONHANDLER_HANDLE)0x4244, options);
+    ASSERT_ARE_EQUAL(int, 1, g_retrieved_enable_ipv6);
+    ASSERT_IS_NOT_NULL(g_retrieved_clone_option);
+    ASSERT_IS_NOT_NULL(g_retrieved_destroy_option);
+
+    cloned_value = (int*)g_retrieved_clone_option(OPTION_ENABLE_IPV6, &g_retrieved_enable_ipv6);
+    ASSERT_IS_NOT_NULL(cloned_value);
+    ASSERT_ARE_EQUAL(int, 1, *cloned_value);
+    g_retrieved_destroy_option(OPTION_ENABLE_IPV6, cloned_value);
+
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_ipv6_literal_with_opt_in_requests_both_families)
+{
+    SOCKETIO_CONFIG socketConfig = { "::1", PORT_NUM, NULL, 1 };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    g_addrinfo_call_fail = true;
+    umock_c_reset_all_calls();
+
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, &callbackContext,
+        test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+
+    ASSERT_ARE_EQUAL(int, AF_UNSPEC, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, g_open_result.result);
+    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+
+    socketio_destroy(ioHandle);
 }
 
 TEST_FUNCTION(socketio_open_socket_fails)

@@ -43,7 +43,6 @@
 #include "azure_c_shared_utility/xlogging.h"
 #include "azure_c_shared_utility/const_defines.h"
 #include "azure_c_shared_utility/safe_math.h"
-#include "host_utils.h"
 #include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -140,6 +139,21 @@ static void* socketio_CloneOption(const char* name, const void* value)
                 }
             }
         }
+        else if (strcmp(name, OPTION_ENABLE_IPV6) == 0)
+        {
+            if (value == NULL)
+            {
+                LogError("Failed cloning option %s (value is NULL)", name);
+            }
+            else if ((result = malloc(sizeof(int))) == NULL)
+            {
+                LogError("Failed cloning option %s (malloc failed)", name);
+            }
+            else
+            {
+                *(int*)result = *(const int*)value;
+            }
+        }
         else
         {
             LogError("Cannot clone option %s (not suppported)", name);
@@ -157,7 +171,8 @@ static void socketio_DestroyOption(const char* name, const void* value)
 {
     if (name != NULL)
     {
-        if (strcmp(name, OPTION_NET_INT_MAC_ADDRESS) == 0 && value != NULL)
+        if (((strcmp(name, OPTION_NET_INT_MAC_ADDRESS) == 0) ||
+            (strcmp(name, OPTION_ENABLE_IPV6) == 0)) && (value != NULL))
         {
             free((void*)value);
         }
@@ -186,6 +201,12 @@ static OPTIONHANDLER_HANDLE socketio_retrieveoptions(CONCRETE_IO_HANDLE handle)
             OptionHandler_AddOption(result, OPTION_NET_INT_MAC_ADDRESS, socket_io_instance->target_mac_address) != OPTIONHANDLER_OK)
         {
             LogError("failed retrieving options (failed adding net_interface_mac_address)");
+            OptionHandler_Destroy(result);
+            result = NULL;
+        }
+        else if (OptionHandler_AddOption(result, OPTION_ENABLE_IPV6, &socket_io_instance->enable_ipv6) != OPTIONHANDLER_OK)
+        {
+            LogError("failed retrieving options (failed adding enable_ipv6)");
             OptionHandler_Destroy(result);
             result = NULL;
         }
@@ -861,13 +882,9 @@ int socketio_open(CONCRETE_IO_HANDLE socket_io, ON_IO_OPEN_COMPLETE on_io_open_c
             {
                 struct addrinfo addrHint = { 0 };
                 // AF_UNSPEC asks for A and AAAA; AF_INET restores the IPv4-only
-                // lookup this adapter did before IPv6 support was added. An IPv6
-                // literal is an explicit request for a specific address, so it is
-                // honoured even when the opt-in is off - the opt-in governs how
-                // hostnames are resolved, not whether an address the caller
-                // supplied is usable.
-                addrHint.ai_family = ((socket_io_instance->enable_ipv6 != 0) ||
-                    host_is_ipv6_literal(socket_io_instance->hostname)) ? AF_UNSPEC : AF_INET;
+                // lookup this adapter did before IPv6 support was added. Apply
+                // the opt-in to every host form, including IPv6 literals.
+                addrHint.ai_family = (socket_io_instance->enable_ipv6 != 0) ? AF_UNSPEC : AF_INET;
                 addrHint.ai_socktype = SOCK_STREAM;
                 addrHint.ai_protocol = 0;
                 // ai_flags is deliberately left clear. AI_ADDRCONFIG suppresses AAAA
