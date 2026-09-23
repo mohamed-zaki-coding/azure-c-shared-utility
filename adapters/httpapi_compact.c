@@ -256,6 +256,7 @@ HTTP_HANDLE HTTPAPI_CreateConnection_Advanced(const char* hostName, int port, bo
                 tlsio_config.port = port;
                 tlsio_config.underlying_io_interface = NULL;
                 tlsio_config.underlying_io_parameters = NULL;
+                tlsio_config.enable_ipv6 = 0;
 
                 HTTP_PROXY_IO_CONFIG proxy_config;
                 if (proxyHost != NULL && strlen(proxyHost) > 0)
