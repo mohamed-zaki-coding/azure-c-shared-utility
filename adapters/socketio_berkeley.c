@@ -396,7 +396,7 @@ static NETWORK_INTERFACE_DESCRIPTION* create_network_interface_description(struc
     return result;
 }
 
-static int get_network_interface_descriptions(int socket, NETWORK_INTERFACE_DESCRIPTION** nid)
+static int get_network_interface_descriptions(int socket, NETWORK_INTERFACE_DESCRIPTION** nid, int* error_code)
 {
     int result;
 
@@ -409,7 +409,8 @@ static int get_network_interface_descriptions(int socket, NETWORK_INTERFACE_DESC
 
     if (ioctl(socket, SIOCGIFCONF, &ifc) == -1)
     {
-        LogError("ioctl failed querying socket (SIOCGIFCONF, errno=%s)", errno);
+        *error_code = errno;
+        LogError("ioctl failed querying socket (SIOCGIFCONF, errno=%d)", *error_code);
         result = __FAILURE__;
     }
     else
@@ -428,24 +429,28 @@ static int get_network_interface_descriptions(int socket, NETWORK_INTERFACE_DESC
 
             if (ioctl(socket, SIOCGIFFLAGS, &ifr) != 0)
             {
-                LogError("ioctl failed querying socket (SIOCGIFFLAGS, errno=%d)", errno);
+                *error_code = errno;
+                LogError("ioctl failed querying socket (SIOCGIFFLAGS, errno=%d)", *error_code);
                 result = __FAILURE__;
                 break;
             }
             else if (ioctl(socket, SIOCGIFHWADDR, &ifr) != 0)
             {
-                LogError("ioctl failed querying socket (SIOCGIFHWADDR, errno=%d)", errno);
+                *error_code = errno;
+                LogError("ioctl failed querying socket (SIOCGIFHWADDR, errno=%d)", *error_code);
                 result = __FAILURE__;
                 break;
             }
             else if (ioctl(socket, SIOCGIFADDR, &ifr) != 0)
             {
-                LogError("ioctl failed querying socket (SIOCGIFADDR, errno=%d)", errno);
+                *error_code = errno;
+                LogError("ioctl failed querying socket (SIOCGIFADDR, errno=%d)", *error_code);
                 result = __FAILURE__;
                 break;
             }
             else if ((new_nid = create_network_interface_description(&ifr, new_nid)) == NULL)
             {
+                *error_code = ENOMEM;
                 LogError("Failed creating network interface description");
                 result = __FAILURE__;
                 break;
@@ -459,6 +464,7 @@ static int get_network_interface_descriptions(int socket, NETWORK_INTERFACE_DESC
         if (result == 0)
         {
             *nid = root_nid;
+            *error_code = 0;
         }
         else
         {
@@ -469,7 +475,7 @@ static int get_network_interface_descriptions(int socket, NETWORK_INTERFACE_DESC
     return result;
 }
 
-static int set_target_network_interface(int target_socket, char* mac_address)
+static int set_target_network_interface(int target_socket, char* mac_address, int* error_code)
 {
     int result;
     int enumeration_socket;
@@ -480,10 +486,11 @@ static int set_target_network_interface(int target_socket, char* mac_address)
     enumeration_socket = socket(AF_INET, SOCK_DGRAM, 0);
     if (enumeration_socket < SOCKET_SUCCESS)
     {
-        LogError("Failed creating socket for network interface enumeration (%d)", errno);
+        *error_code = errno;
+        LogError("Failed creating socket for network interface enumeration (%d)", *error_code);
         result = __FAILURE__;
     }
-    else if (get_network_interface_descriptions(enumeration_socket, &nid) != 0)
+    else if (get_network_interface_descriptions(enumeration_socket, &nid, error_code) != 0)
     {
         LogError("Failed getting network interface descriptions");
         result = __FAILURE__;
@@ -504,16 +511,19 @@ static int set_target_network_interface(int target_socket, char* mac_address)
 
         if (current_nid == NULL)
         {
+            *error_code = ENODEV;
             LogError("Did not find a network interface matching MAC ADDRESS");
             result = __FAILURE__;
         }
         else if (setsockopt(target_socket, SOL_SOCKET, SO_BINDTODEVICE, current_nid->name, strlen(current_nid->name)) != 0)
         {
-            LogError("setsockopt failed (%d)", errno);
+            *error_code = errno;
+            LogError("setsockopt failed (%d)", *error_code);
             result = __FAILURE__;
         }
         else
         {
+            *error_code = 0;
             result = 0;
         }
 
@@ -695,10 +705,10 @@ static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, const str
     }
 #ifndef __APPLE__
     else if (socket_io_instance->target_mac_address != NULL &&
-        set_target_network_interface(socket_io_instance->socket, socket_io_instance->target_mac_address) != 0)
+        set_target_network_interface(socket_io_instance->socket, socket_io_instance->target_mac_address, error_code) != 0)
     {
-        *error_code = __FAILURE__;
-        LogError("Failure: failed selecting target network interface (MACADDR=%s).", socket_io_instance->target_mac_address);
+        LogError("Failure: failed selecting target network interface (MACADDR=%s, errno=%d).",
+            socket_io_instance->target_mac_address, *error_code);
     }
 #endif //__APPLE__
     else if ((-1 == (flags = fcntl(socket_io_instance->socket, F_GETFL, 0))) ||

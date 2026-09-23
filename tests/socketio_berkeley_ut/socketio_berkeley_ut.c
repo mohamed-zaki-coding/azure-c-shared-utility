@@ -603,6 +603,26 @@ TEST_FUNCTION(socketio_open_fails_and_releases_every_socket_when_all_candidates_
     socketio_destroy(ioHandle);
 }
 
+#ifndef __APPLE__
+TEST_FUNCTION(socketio_open_preserves_network_interface_enumeration_error)
+{
+    const int families[] = { AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(1, families, outcomes);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 0);
+    ASSERT_ARE_EQUAL(int, 0, socketio_setoption(ioHandle, OPTION_NET_INT_MAC_ADDRESS, "00:11:22:33:44:55"));
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, ENOTTY, g_open_result.code);
+
+    socketio_destroy(ioHandle);
+}
+#endif
+
 /* IPv4-mapped destinations such as ::ffff:203.0.113.1 resolve to AF_INET6 and
    can only be delivered by a dual-stack socket, so IPV6_V6ONLY has to be
    cleared - and only on AF_INET6 sockets, where the option means anything. */
