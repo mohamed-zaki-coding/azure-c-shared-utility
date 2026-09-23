@@ -56,11 +56,11 @@
 #define IFREQ_BUFFER_SIZE              1024
 #endif
 
-#define CONNECT_TIMEOUT_SECONDS 10
+#define CONNECT_TIMEOUT_PER_ADDRESS_SECONDS 10
 // Time allowed for a connect attempt against a single resolved address. There
 // is no budget shared across addresses: each candidate gets this in full, so a
 // blackholed address cannot deny the ones behind it their attempt.
-#define CONNECT_TIMEOUT_MS (CONNECT_TIMEOUT_SECONDS * 1000)
+#define CONNECT_TIMEOUT_PER_ADDRESS_MS (CONNECT_TIMEOUT_PER_ADDRESS_SECONDS * 1000)
 #define SOCKETIO_POLL_TIMEOUT_ERROR 110  /* ETIMEDOUT equivalent for poll timeout */
 
 typedef enum IO_STATE_TAG
@@ -905,7 +905,7 @@ int socketio_open(CONCRETE_IO_HANDLE socket_io, ON_IO_OPEN_COMPLETE on_io_open_c
                         // leave the other family - often the only one that works -
                         // unattempted. The cost is that the worst case grows with
                         // the number of resolved addresses rather than being capped.
-                        if (connect_to_addrinfo(socket_io_instance, address, CONNECT_TIMEOUT_MS, &connect_error) == 0)
+                        if (connect_to_addrinfo(socket_io_instance, address, CONNECT_TIMEOUT_PER_ADDRESS_MS, &connect_error) == 0)
                         {
                             result = 0;
                             break;
