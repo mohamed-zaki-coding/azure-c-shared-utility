@@ -118,6 +118,8 @@ static pfCloneOption g_retrieved_clone_option;
 static pfDestroyOption g_retrieved_destroy_option;
 
 static IO_OPEN_RESULT_DETAILED g_open_result;
+static size_t g_open_complete_count;
+static int g_getaddrinfo_result;
 
 // Number of descriptors the process currently holds. Comparing this around an
 // open is a direct check that failed candidates released their sockets - a
@@ -217,9 +219,10 @@ MOCK_FUNCTION_WITH_CODE(, int, getaddrinfo, const char*, node, const char*, serv
 size_t candidate_index;
 struct addrinfo* head = NULL;
 struct addrinfo* tail = NULL;
+int getaddrinfo_result = g_getaddrinfo_result;
 g_last_addrinfo_family = (hints != NULL) ? hints->ai_family : -1;
 g_last_addrinfo_flags = (hints != NULL) ? hints->ai_flags : -1;
-for (candidate_index = 0; candidate_index < g_candidate_count; candidate_index++)
+for (candidate_index = 0; (getaddrinfo_result == 0) && (candidate_index < g_candidate_count); candidate_index++)
 {
     struct addrinfo* entry = (struct addrinfo*)calloc(1, sizeof(struct addrinfo));
     entry->ai_family = g_candidate_families[candidate_index];
@@ -250,7 +253,7 @@ for (candidate_index = 0; candidate_index < g_candidate_count; candidate_index++
     tail = entry;
 }
 *res = head;
-MOCK_FUNCTION_END(0)
+MOCK_FUNCTION_END(getaddrinfo_result)
 
 MOCK_FUNCTION_WITH_CODE(, void, freeaddrinfo, struct addrinfo*, res)
 while (res != NULL)
@@ -326,6 +329,7 @@ static void test_on_bytes_received(void* context, const unsigned char* buffer, s
 static void test_on_io_open_complete(void* context, IO_OPEN_RESULT_DETAILED open_result)
 {
     (void)context;
+    g_open_complete_count++;
     g_open_result = open_result;
 }
 
@@ -468,6 +472,8 @@ TEST_FUNCTION_INITIALIZE(method_init)
     singlylinkedlist_add_called = false;
     g_open_result.result = IO_OPEN_CANCELLED;
     g_open_result.code = 0;
+    g_open_complete_count = 0;
+    g_getaddrinfo_result = 0;
 }
 
 TEST_FUNCTION_CLEANUP(method_cleanup)
@@ -800,6 +806,211 @@ TEST_FUNCTION(socketio_setoption_enable_ipv6_before_open_enables_dual_stack_reso
     ASSERT_ARE_EQUAL(int, AF_UNSPEC, g_last_addrinfo_family);
     ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
     ASSERT_ARE_EQUAL(int, AF_INET6, g_connect_families[0]);
+
+    socketio_destroy(ioHandle);
+}
+
+/* Literals follow the opt-in like hostnames do: without it the lookup is the
+   pre-IPv6 AF_INET one, with it both families are requested. */
+TEST_FUNCTION(socketio_open_ipv4_literal_without_opt_in_requests_ipv4_only)
+{
+    const int families[] = { AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(1, families, outcomes);
+    ioHandle = create_socket_io("127.0.0.1", 0);
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, AF_INET, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, AF_INET, g_connect_families[0]);
+
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_ipv4_literal_with_opt_in_requests_both_families)
+{
+    const int families[] = { AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(1, families, outcomes);
+    ioHandle = create_socket_io("127.0.0.1", 1);
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, AF_UNSPEC, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, AF_INET, g_connect_families[0]);
+
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_ipv6_literal_with_opt_in_requests_both_families)
+{
+    const int families[] = { AF_INET6 };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(1, families, outcomes);
+    ioHandle = create_socket_io("::1", 1);
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, AF_UNSPEC, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, AF_INET6, g_connect_families[0]);
+
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_ipv4_mapped_literal_without_opt_in_requests_ipv4_only)
+{
+    const int families[] = { AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(1, families, outcomes);
+    ioHandle = create_socket_io("::ffff:127.0.0.1", 0);
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, AF_INET, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(size_t, (size_t)0, g_v6only_cleared_count);
+
+    socketio_destroy(ioHandle);
+}
+
+/* With the opt-in, a mapped literal resolves to an AF_INET6 candidate, which only
+   reaches its IPv4 destination from a dual-stack socket. */
+TEST_FUNCTION(socketio_open_ipv4_mapped_literal_with_opt_in_uses_a_dual_stack_socket)
+{
+    const int families[] = { AF_INET6 };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(1, families, outcomes);
+    ioHandle = create_socket_io("::ffff:127.0.0.1", 1);
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, AF_UNSPEC, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, AF_INET6, g_connect_families[0]);
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_v6only_cleared_count);
+    ASSERT_ARE_EQUAL(int, 0, g_v6only_last_value);
+
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_setoption_can_turn_the_ipv6_opt_in_back_off_before_open)
+{
+    const int families[] = { AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+    int enable_ipv6 = 0;
+
+    given_candidates(1, families, outcomes);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_setoption(ioHandle, OPTION_ENABLE_IPV6, &enable_ipv6));
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, AF_INET, g_last_addrinfo_family);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+
+    socketio_destroy(ioHandle);
+}
+
+/* However many candidates are tried, the caller hears about the open once. */
+TEST_FUNCTION(socketio_open_reports_one_open_complete_when_a_later_candidate_connects)
+{
+    const int families[] = { AF_INET6, AF_INET6, AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_TIMES_OUT, ATTEMPT_REFUSED, ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(3, families, outcomes);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_open_complete_count);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(size_t, (size_t)3, g_connect_attempt_count);
+
+    socketio_destroy(ioHandle);
+}
+
+TEST_FUNCTION(socketio_open_reports_one_open_complete_when_every_candidate_fails)
+{
+    const int families[] = { AF_INET6, AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_REFUSED, ATTEMPT_TIMES_OUT };
+    CONCRETE_IO_HANDLE ioHandle;
+    size_t fds_before;
+
+    given_candidates(2, families, outcomes);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    fds_before = open_fd_count();
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_open_complete_count);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, g_open_result.result);
+    ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+
+    socketio_destroy(ioHandle);
+}
+
+/* A failed lookup has no candidate to try: one error callback carrying the
+   resolver's code, and no socket created. */
+TEST_FUNCTION(socketio_open_dns_failure_reports_one_error_and_creates_no_socket)
+{
+    const int families[] = { AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+    size_t fds_before;
+
+    given_candidates(1, families, outcomes);
+    g_getaddrinfo_result = EAI_NONAME;
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    fds_before = open_fd_count();
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_open_complete_count);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, EAI_NONAME, g_open_result.code);
+    ASSERT_ARE_EQUAL(size_t, (size_t)0, g_connect_attempt_count);
+    ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+
+    socketio_destroy(ioHandle);
+}
+
+/* A failed open leaves the instance closed and clean, so it can be opened again. */
+TEST_FUNCTION(socketio_open_can_be_retried_after_every_candidate_failed)
+{
+    const int families[] = { AF_INET };
+    const ATTEMPT_OUTCOME fail[] = { ATTEMPT_TIMES_OUT };
+    const ATTEMPT_OUTCOME succeed[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+
+    given_candidates(1, families, fail);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, g_open_result.result);
+
+    g_connect_attempt_count = 0;
+    g_poll_count = 0;
+    given_candidates(1, families, succeed);
+    (void)socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL);
+
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(size_t, (size_t)2, g_open_complete_count);
+    ASSERT_ARE_EQUAL(int, EXPECTED_PER_ADDRESS_TIMEOUT_MS, g_poll_timeouts_ms[0]);
 
     socketio_destroy(ioHandle);
 }
