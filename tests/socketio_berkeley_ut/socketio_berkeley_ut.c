@@ -974,6 +974,43 @@ TEST_FUNCTION(socketio_setoption_can_turn_the_ipv6_opt_in_back_off_before_open)
     socketio_destroy(ioHandle);
 }
 
+/* The opt-in belongs to the IO instance, not to one connection: an IO that is
+   closed and opened again, as a WebSocket client does when it reconnects, keeps
+   asking the resolver for both families every time and releases each socket. */
+TEST_FUNCTION(socketio_open_keeps_the_ipv6_opt_in_across_close_and_reopen)
+{
+    const int families[] = { AF_INET6 };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+    size_t fds_before;
+    int cycle;
+
+    given_candidates(1, families, outcomes);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    fds_before = open_fd_count();
+
+    for (cycle = 0; cycle < 4; cycle++)
+    {
+        // Each open starts from the first scripted attempt again.
+        g_connect_attempt_count = 0;
+        g_last_addrinfo_family = -1;
+        g_open_complete_count = 0;
+        g_open_result.result = IO_OPEN_CANCELLED;
+
+        ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+        ASSERT_ARE_EQUAL(int, AF_UNSPEC, g_last_addrinfo_family);
+        ASSERT_ARE_EQUAL(size_t, (size_t)1, g_open_complete_count);
+        ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+        ASSERT_ARE_EQUAL(int, AF_INET6, g_connect_families[0]);
+
+        ASSERT_ARE_EQUAL(int, 0, socketio_close(ioHandle, NULL, NULL));
+        ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+    }
+
+    socketio_destroy(ioHandle);
+}
+
 /* However many candidates are tried, the caller hears about the open once. */
 TEST_FUNCTION(socketio_open_reports_one_open_complete_when_a_later_candidate_connects)
 {
