@@ -1019,6 +1019,36 @@ TEST_FUNCTION(socketio_open_pending_connect_reports_socket_error)
     socketio_destroy(ioHandle);
 }
 
+TEST_FUNCTION(socketio_open_pending_connect_select_failure_reports_the_wsa_error)
+{
+    SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
+    CONCRETE_IO_HANDLE ioHandle = socketio_create(&socketConfig);
+    umock_c_reset_all_calls();
+
+    EXPECTED_CALL(getaddrinfo(IGNORED_PTR_ARG, IGNORED_PTR_ARG, &TEST_ADDR_INFO, IGNORED_PTR_ARG)).IgnoreArgument_pHints();
+    EXPECTED_CALL(socket(IGNORED_NUM_ARG, IGNORED_NUM_ARG, IGNORED_NUM_ARG));
+    EXPECTED_CALL(ioctlsocket(IGNORED_NUM_ARG, IGNORED_NUM_ARG, IGNORED_PTR_ARG));
+    EXPECTED_CALL(inet_ntop(IGNORED_NUM_ARG, IGNORED_PTR_ARG, IGNORED_PTR_ARG, IGNORED_NUM_ARG));
+    EXPECTED_CALL(connect(IGNORED_NUM_ARG, &test_sock_addr, IGNORED_NUM_ARG)).SetReturn(SOCKET_ERROR);
+    EXPECTED_CALL(WSAGetLastError()).SetReturn(WSAEWOULDBLOCK);
+    // select() itself fails (not a timeout): the candidate fails with the WSA
+    // error select reported and its socket is released.
+    EXPECTED_CALL(select(0, NULL, IGNORED_PTR_ARG, IGNORED_PTR_ARG, IGNORED_PTR_ARG)).SetReturn(SOCKET_ERROR);
+    EXPECTED_CALL(WSAGetLastError()).SetReturn(WSAENOTSOCK);
+    EXPECTED_CALL(closesocket(IGNORED_NUM_ARG));
+    EXPECTED_CALL(freeaddrinfo(&TEST_ADDR_INFO)).IgnoreArgument_pResult();
+
+    int result = socketio_open(ioHandle, test_on_io_open_complete, &callbackContext,
+        test_on_bytes_received, &callbackContext, test_on_io_error, &callbackContext);
+
+    ASSERT_ARE_EQUAL(int, 0, result);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, WSAENOTSOCK, g_open_result.code);
+    ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+
+    socketio_destroy(ioHandle);
+}
+
 TEST_FUNCTION(socketio_open_timeout_falls_back_to_next_address)
 {
     SOCKETIO_CONFIG socketConfig = { HOSTNAME_ARG, PORT_NUM, NULL };
