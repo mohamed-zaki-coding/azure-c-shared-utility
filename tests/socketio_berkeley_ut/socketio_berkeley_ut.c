@@ -101,6 +101,8 @@ typedef enum ATTEMPT_OUTCOME_TAG
     // poll() is interrupted by a signal once (-1, EINTR) and then reports the
     // socket as settled; SO_ERROR reads 0.
     ATTEMPT_EINTR_THEN_SUCCEEDS,
+    ATTEMPT_EINTR_THEN_TIMES_OUT,
+    ATTEMPT_REPEATED_EINTR_THEN_TIMES_OUT,
     // poll() itself fails with EBADF (not a timeout, not EINTR).
     ATTEMPT_POLL_FAILS
 } ATTEMPT_OUTCOME;
@@ -120,6 +122,7 @@ static size_t g_connect_attempt_count;
 static int g_poll_timeouts_ms[MAX_CANDIDATES];
 static size_t g_poll_count;
 static size_t g_poll_count_at_attempt_start;
+static unsigned int g_interruption_seconds;
 static int g_socket_domains[MAX_CANDIDATES];
 static int g_socket_types[MAX_CANDIDATES];
 static size_t g_socket_count;
@@ -217,9 +220,14 @@ if (g_poll_count < MAX_CANDIDATES)
     g_poll_timeouts_ms[g_poll_count] = timeout;
 }
 g_poll_count++;
-if ((outcome == ATTEMPT_EINTR_THEN_SUCCEEDS) && (g_poll_count - g_poll_count_at_attempt_start == 1))
+if (((outcome == ATTEMPT_EINTR_THEN_SUCCEEDS) && (g_poll_count - g_poll_count_at_attempt_start == 1)) ||
+    ((outcome == ATTEMPT_EINTR_THEN_TIMES_OUT) && (g_poll_count - g_poll_count_at_attempt_start == 1)) ||
+    ((outcome == ATTEMPT_REPEATED_EINTR_THEN_TIMES_OUT) && (g_poll_count - g_poll_count_at_attempt_start <= 3)))
 {
-    // First poll of this attempt is interrupted by a signal.
+    if (outcome != ATTEMPT_EINTR_THEN_SUCCEEDS)
+    {
+        (void)sleep(g_interruption_seconds);
+    }
     errno = EINTR;
     poll_result = -1;
 }
@@ -232,7 +240,9 @@ else
 {
     // 0 means the grant ran out; anything positive means the socket settled and
     // the adapter goes on to read SO_ERROR.
-    poll_result = (outcome == ATTEMPT_TIMES_OUT) ? 0 : 1;
+    poll_result = ((outcome == ATTEMPT_TIMES_OUT) ||
+        (outcome == ATTEMPT_EINTR_THEN_TIMES_OUT) ||
+        (outcome == ATTEMPT_REPEATED_EINTR_THEN_TIMES_OUT)) ? 0 : 1;
 }
 MOCK_FUNCTION_END(poll_result)
 
@@ -509,6 +519,7 @@ TEST_FUNCTION_INITIALIZE(method_init)
     g_connect_attempt_count = 0;
     g_poll_count = 0;
     g_poll_count_at_attempt_start = 0;
+    g_interruption_seconds = 1;
     g_socket_count = 0;
     g_v6only_cleared_count = 0;
     g_v6only_last_value = -1;
@@ -1123,6 +1134,89 @@ TEST_FUNCTION(socketio_open_retries_poll_after_eintr_and_connects)
     ASSERT_ARE_EQUAL(size_t, (size_t)2, g_poll_count);
     // The connected socket is kept open by the instance.
     ASSERT_ARE_EQUAL(size_t, fds_before + 1, open_fd_count());
+
+    socketio_destroy(ioHandle);
+    ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+}
+
+TEST_FUNCTION(socketio_open_preserves_remaining_time_after_eintr_and_falls_back)
+{
+    const int families[] = { AF_INET6, AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_EINTR_THEN_TIMES_OUT, ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+    size_t fds_before;
+
+    given_candidates(2, families, outcomes);
+    g_interruption_seconds = 5;
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    fds_before = open_fd_count();
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(size_t, (size_t)3, g_poll_count);
+    ASSERT_ARE_EQUAL(int, EXPECTED_PER_ADDRESS_TIMEOUT_MS, g_poll_timeouts_ms[0]);
+    ASSERT_IS_TRUE(g_poll_timeouts_ms[1] <= 5000);
+    ASSERT_IS_TRUE(g_poll_timeouts_ms[1] >= 4500);
+    ASSERT_ARE_EQUAL(int, EXPECTED_PER_ADDRESS_TIMEOUT_MS, g_poll_timeouts_ms[2]);
+    ASSERT_ARE_EQUAL(size_t, (size_t)2, g_connect_attempt_count);
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_open_complete_count);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(size_t, fds_before + 1, open_fd_count());
+
+    socketio_destroy(ioHandle);
+    ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+}
+
+TEST_FUNCTION(socketio_open_preserves_remaining_second_after_late_eintr)
+{
+    const int families[] = { AF_INET6, AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_EINTR_THEN_TIMES_OUT, ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+    size_t fds_before;
+
+    given_candidates(2, families, outcomes);
+    g_interruption_seconds = 9;
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    fds_before = open_fd_count();
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(size_t, (size_t)3, g_poll_count);
+    ASSERT_ARE_EQUAL(int, EXPECTED_PER_ADDRESS_TIMEOUT_MS, g_poll_timeouts_ms[0]);
+    ASSERT_IS_TRUE(g_poll_timeouts_ms[1] <= 1000);
+    ASSERT_IS_TRUE(g_poll_timeouts_ms[1] >= 500);
+    ASSERT_ARE_EQUAL(int, EXPECTED_PER_ADDRESS_TIMEOUT_MS, g_poll_timeouts_ms[2]);
+    ASSERT_ARE_EQUAL(size_t, (size_t)2, g_connect_attempt_count);
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_open_complete_count);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+
+    socketio_destroy(ioHandle);
+    ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+}
+
+TEST_FUNCTION(socketio_open_repeated_eintr_does_not_reset_the_deadline)
+{
+    const int families[] = { AF_INET6, AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_REPEATED_EINTR_THEN_TIMES_OUT, ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+    size_t fds_before;
+
+    given_candidates(2, families, outcomes);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    fds_before = open_fd_count();
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(size_t, (size_t)5, g_poll_count);
+    ASSERT_ARE_EQUAL(int, EXPECTED_PER_ADDRESS_TIMEOUT_MS, g_poll_timeouts_ms[0]);
+    ASSERT_IS_TRUE(g_poll_timeouts_ms[1] <= EXPECTED_PER_ADDRESS_TIMEOUT_MS - 900);
+    ASSERT_IS_TRUE(g_poll_timeouts_ms[2] <= EXPECTED_PER_ADDRESS_TIMEOUT_MS - 1900);
+    ASSERT_IS_TRUE(g_poll_timeouts_ms[3] <= EXPECTED_PER_ADDRESS_TIMEOUT_MS - 2900);
+    ASSERT_IS_TRUE(g_poll_timeouts_ms[3] > 0);
+    ASSERT_ARE_EQUAL(int, EXPECTED_PER_ADDRESS_TIMEOUT_MS, g_poll_timeouts_ms[4]);
+    ASSERT_ARE_EQUAL(size_t, (size_t)2, g_connect_attempt_count);
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_open_complete_count);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
 
     socketio_destroy(ioHandle);
     ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());

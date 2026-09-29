@@ -76,6 +76,9 @@ Preferred family blackholed, with a reachable IPv4 candidate behind it:
 Every candidate receives the full `CONNECT_TIMEOUT_PER_ADDRESS_MS` grant. The
 total can therefore grow to approximately the number of timed-out candidates
 multiplied by 10 seconds before a later healthy candidate succeeds.
+Signals that interrupt the Berkeley `poll()` wait do not restart that
+candidate's grant: its remaining time is measured from the original
+per-address deadline. The next candidate still gets a fresh 10 seconds.
 
 This is sequential candidate fallback, not a shared family budget or Happy
 Eyeballs race. The opt-in IPv6 setting controls hostname resolution: disabled
