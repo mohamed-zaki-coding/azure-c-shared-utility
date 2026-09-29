@@ -16,17 +16,20 @@
 #endif
 
 #include <signal.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 #include "azure_c_shared_utility/socketio.h"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <poll.h>
 #ifdef TIZENRT
 #include <net/lwip/tcp.h>
+#include <tinyara/clock.h>
 #else
 #include <netinet/tcp.h>
 #endif
@@ -61,6 +64,21 @@
 // blackholed address cannot deny the ones behind it their attempt.
 #define CONNECT_TIMEOUT_PER_ADDRESS_MS (CONNECT_TIMEOUT_PER_ADDRESS_SECONDS * 1000)
 #define SOCKETIO_POLL_TIMEOUT_ERROR 110  /* ETIMEDOUT equivalent for poll timeout */
+
+static int get_connect_time(struct timespec* now)
+{
+#if defined(TIZENRT) && !defined(CLOCK_MONOTONIC)
+    int result = clock_systimespec(now);
+    if (result != 0)
+    {
+        errno = -result;
+        result = -1;
+    }
+    return result;
+#else
+    return clock_gettime(CLOCK_MONOTONIC, now);
+#endif
+}
 
 typedef enum IO_STATE_TAG
 {
@@ -769,6 +787,7 @@ static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, const str
         {
             int poll_result;
             int poll_error = 0;
+            int clock_error = 0;
             struct pollfd fd = { 0 };
             fd.fd = socket_io_instance->socket;
             fd.events = POLLOUT;
@@ -776,14 +795,46 @@ static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, const str
             LogInfo("Connect in progress (EINPROGRESS), waiting up to %d milliseconds for %s:%d",
                 timeout_ms, socket_io_instance->hostname, socket_io_instance->port);
 
-            do
+            struct timespec now;
+            if (get_connect_time(&now) != 0)
             {
-                poll_result = poll(&fd, 1, timeout_ms);
-                if (poll_result < 0)
+                poll_result = -1;
+                poll_error = errno;
+                clock_error = 1;
+            }
+            else
+            {
+                int64_t deadline_ns = (int64_t)now.tv_sec * 1000000000LL +
+                    now.tv_nsec + (int64_t)timeout_ms * 1000000LL;
+                int remaining_ms = timeout_ms;
+
+                do
                 {
-                    poll_error = errno;
-                }
-            } while ((poll_result < 0) && (poll_error == EINTR));
+                    poll_result = poll(&fd, 1, remaining_ms);
+                    if (poll_result < 0)
+                    {
+                        poll_error = errno;
+                        if (poll_error == EINTR)
+                        {
+                            int64_t remaining_ns;
+                            if (get_connect_time(&now) != 0)
+                            {
+                                poll_error = errno;
+                                clock_error = 1;
+                                break;
+                            }
+
+                            remaining_ns = deadline_ns - ((int64_t)now.tv_sec * 1000000000LL + now.tv_nsec);
+                            if (remaining_ns <= 0)
+                            {
+                                poll_result = 0;
+                                break;
+                            }
+                            remaining_ms = (int)((remaining_ns + 999999LL) / 1000000LL);
+                        }
+                    }
+                } while ((poll_result < 0) && (poll_error == EINTR));
+            }
 
             if (poll_result == 0)
             {
@@ -794,8 +845,15 @@ static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, const str
             else if (poll_result < 0)
             {
                 *error_code = poll_error;
-                LogError("Failure: poll failure, retval %d, errno %d (%s).",
-                    poll_result, poll_error, strerror(poll_error));
+                if (clock_error)
+                {
+                    LogError("Failure: monotonic clock failure %d (%s).", poll_error, strerror(poll_error));
+                }
+                else
+                {
+                    LogError("Failure: poll failure, retval %d, errno %d (%s).",
+                        poll_result, poll_error, strerror(poll_error));
+                }
             }
             else
             {
