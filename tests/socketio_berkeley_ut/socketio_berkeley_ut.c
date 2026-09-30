@@ -19,6 +19,11 @@
 // and pinning the full trace would make the suite fail on harmless refactors
 // instead of on a behaviour change.
 
+// For syscall(), which the virtual clock below uses to reach the real clock.
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #ifdef __cplusplus
 #include <cstdint>
 #include <cstdlib>
@@ -38,7 +43,9 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "testrunnerswitcher.h"
@@ -103,6 +110,8 @@ typedef enum ATTEMPT_OUTCOME_TAG
     ATTEMPT_EINTR_THEN_SUCCEEDS,
     ATTEMPT_EINTR_THEN_TIMES_OUT,
     ATTEMPT_REPEATED_EINTR_THEN_TIMES_OUT,
+    // poll() advances the virtual clock and is interrupted once, then times out.
+    ATTEMPT_EINTR_ADVANCES_CLOCK_THEN_TIMES_OUT,
     // poll() itself fails with EBADF (not a timeout, not EINTR).
     ATTEMPT_POLL_FAILS
 } ATTEMPT_OUTCOME;
@@ -137,6 +146,52 @@ static pfDestroyOption g_retrieved_destroy_option;
 static IO_OPEN_RESULT_DETAILED g_open_result;
 static size_t g_open_complete_count;
 static int g_getaddrinfo_result;
+
+// A virtual CLOCK_MONOTONIC to place interruptions at the deadline's edges without
+// sleeping. Off by default, so the tests that measure real time are unaffected.
+static int g_virtual_clock_enabled;
+static int64_t g_virtual_clock_ns;
+static int64_t g_virtual_clock_advance_ns;
+static size_t g_virtual_clock_call_count;
+static size_t g_virtual_clock_failing_call;
+
+int clock_gettime(clockid_t clock_id, struct timespec* tp)
+{
+    if (!g_virtual_clock_enabled || (clock_id != CLOCK_MONOTONIC))
+    {
+        return (int)syscall(SYS_clock_gettime, clock_id, tp);
+    }
+
+    g_virtual_clock_call_count++;
+    if (g_virtual_clock_call_count == g_virtual_clock_failing_call)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    tp->tv_sec = (time_t)(g_virtual_clock_ns / 1000000000LL);
+    tp->tv_nsec = (long)(g_virtual_clock_ns % 1000000000LL);
+    return 0;
+}
+
+// Enables the virtual clock and asserts that it is interposed. failing_call is the
+// 1-based clock call that fails with EINVAL, or 0 for none.
+static void use_virtual_clock(int64_t advance_on_interruption_ns, size_t failing_call)
+{
+    struct timespec now;
+
+    g_virtual_clock_enabled = 1;
+    g_virtual_clock_ns = 1000LL * 1000000000LL;
+    g_virtual_clock_advance_ns = advance_on_interruption_ns;
+    g_virtual_clock_call_count = 0;
+    g_virtual_clock_failing_call = 0;
+
+    ASSERT_ARE_EQUAL(int, 0, clock_gettime(CLOCK_MONOTONIC, &now));
+    ASSERT_IS_TRUE(((int64_t)now.tv_sec * 1000000000LL + now.tv_nsec) == g_virtual_clock_ns, "clock_gettime() is not interposed");
+
+    g_virtual_clock_call_count = 0;
+    g_virtual_clock_failing_call = failing_call;
+}
 
 // Number of descriptors the process currently holds. Comparing this around an
 // open is a direct check that failed candidates released their sockets - a
@@ -231,6 +286,12 @@ if (((outcome == ATTEMPT_EINTR_THEN_SUCCEEDS) && (g_poll_count - g_poll_count_at
     errno = EINTR;
     poll_result = -1;
 }
+else if ((outcome == ATTEMPT_EINTR_ADVANCES_CLOCK_THEN_TIMES_OUT) && (g_poll_count - g_poll_count_at_attempt_start == 1))
+{
+    g_virtual_clock_ns += g_virtual_clock_advance_ns;
+    errno = EINTR;
+    poll_result = -1;
+}
 else if (outcome == ATTEMPT_POLL_FAILS)
 {
     errno = EBADF;
@@ -242,7 +303,8 @@ else
     // the adapter goes on to read SO_ERROR.
     poll_result = ((outcome == ATTEMPT_TIMES_OUT) ||
         (outcome == ATTEMPT_EINTR_THEN_TIMES_OUT) ||
-        (outcome == ATTEMPT_REPEATED_EINTR_THEN_TIMES_OUT)) ? 0 : 1;
+        (outcome == ATTEMPT_REPEATED_EINTR_THEN_TIMES_OUT) ||
+        (outcome == ATTEMPT_EINTR_ADVANCES_CLOCK_THEN_TIMES_OUT)) ? 0 : 1;
 }
 MOCK_FUNCTION_END(poll_result)
 
@@ -534,10 +596,12 @@ TEST_FUNCTION_INITIALIZE(method_init)
     g_open_result.code = 0;
     g_open_complete_count = 0;
     g_getaddrinfo_result = 0;
+    g_virtual_clock_enabled = 0;
 }
 
 TEST_FUNCTION_CLEANUP(method_cleanup)
 {
+    g_virtual_clock_enabled = 0;
     TEST_MUTEX_RELEASE(g_testByTest);
 }
 
@@ -1220,6 +1284,138 @@ TEST_FUNCTION(socketio_open_repeated_eintr_does_not_reset_the_deadline)
 
     socketio_destroy(ioHandle);
     ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+}
+
+/* An interruption that ends past the deadline times the candidate out without
+   another poll(); the next candidate still gets a full grant. */
+TEST_FUNCTION(socketio_open_eintr_after_the_deadline_times_out_and_falls_back)
+{
+    const int families[] = { AF_INET6, AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_EINTR_ADVANCES_CLOCK_THEN_TIMES_OUT, ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+    size_t fds_before;
+
+    given_candidates(2, families, outcomes);
+    use_virtual_clock(10500LL * 1000000LL, 0);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    fds_before = open_fd_count();
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(size_t, (size_t)2, g_poll_count);
+    ASSERT_ARE_EQUAL(int, EXPECTED_PER_ADDRESS_TIMEOUT_MS, g_poll_timeouts_ms[0]);
+    ASSERT_ARE_EQUAL(int, EXPECTED_PER_ADDRESS_TIMEOUT_MS, g_poll_timeouts_ms[1]);
+    ASSERT_ARE_EQUAL(size_t, (size_t)2, g_connect_attempt_count);
+    ASSERT_ARE_EQUAL(int, AF_INET, g_connect_families[1]);
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_open_complete_count);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(size_t, fds_before + 1, open_fd_count());
+
+    socketio_destroy(ioHandle);
+    ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+}
+
+/* An interruption that ends exactly at the deadline leaves no time: it is reported
+   as the per-address timeout, not as an interrupted or failed poll(). */
+TEST_FUNCTION(socketio_open_eintr_at_the_deadline_reports_a_timeout)
+{
+    const int families[] = { AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_EINTR_ADVANCES_CLOCK_THEN_TIMES_OUT };
+    CONCRETE_IO_HANDLE ioHandle;
+    size_t fds_before;
+
+    given_candidates(1, families, outcomes);
+    use_virtual_clock((int64_t)EXPECTED_PER_ADDRESS_TIMEOUT_MS * 1000000LL, 0);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    fds_before = open_fd_count();
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_poll_count);
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_open_complete_count);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, SOCKETIO_POLL_TIMEOUT_ERROR_CODE, g_open_result.code);
+    ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+
+    socketio_destroy(ioHandle);
+}
+
+/* Less than a millisecond left after an interruption is rounded up to one, so the
+   candidate is not cut short by the conversion to poll()'s millisecond timeout. */
+TEST_FUNCTION(socketio_open_rounds_a_sub_millisecond_remainder_up_after_eintr)
+{
+    const int families[] = { AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_EINTR_ADVANCES_CLOCK_THEN_TIMES_OUT };
+    CONCRETE_IO_HANDLE ioHandle;
+    size_t fds_before;
+
+    given_candidates(1, families, outcomes);
+    use_virtual_clock((int64_t)EXPECTED_PER_ADDRESS_TIMEOUT_MS * 1000000LL - 500000LL, 0);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    fds_before = open_fd_count();
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(size_t, (size_t)2, g_poll_count);
+    ASSERT_ARE_EQUAL(int, EXPECTED_PER_ADDRESS_TIMEOUT_MS, g_poll_timeouts_ms[0]);
+    ASSERT_ARE_EQUAL(int, 1, g_poll_timeouts_ms[1]);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, SOCKETIO_POLL_TIMEOUT_ERROR_CODE, g_open_result.code);
+    ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+
+    socketio_destroy(ioHandle);
+}
+
+/* Without a monotonic clock there is no deadline: the candidate fails with the clock's
+   error before any poll(), releases its socket, and the next gets a full grant. */
+TEST_FUNCTION(socketio_open_clock_failure_before_poll_fails_the_candidate_and_falls_back)
+{
+    const int families[] = { AF_INET6, AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_TIMES_OUT, ATTEMPT_SUCCEEDS };
+    CONCRETE_IO_HANDLE ioHandle;
+    size_t fds_before;
+
+    given_candidates(2, families, outcomes);
+    use_virtual_clock(0, 1);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    fds_before = open_fd_count();
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(size_t, (size_t)2, g_connect_attempt_count);
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_poll_count);
+    ASSERT_ARE_EQUAL(int, EXPECTED_PER_ADDRESS_TIMEOUT_MS, g_poll_timeouts_ms[0]);
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_open_complete_count);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_OK, g_open_result.result);
+    ASSERT_ARE_EQUAL(size_t, fds_before + 1, open_fd_count());
+
+    socketio_destroy(ioHandle);
+    ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+}
+
+/* A clock failure after an interruption ends the candidate with the clock's error,
+   instead of waiting again with a stale grant or reporting EINTR. */
+TEST_FUNCTION(socketio_open_clock_failure_after_eintr_reports_the_clock_error)
+{
+    const int families[] = { AF_INET };
+    const ATTEMPT_OUTCOME outcomes[] = { ATTEMPT_EINTR_ADVANCES_CLOCK_THEN_TIMES_OUT };
+    CONCRETE_IO_HANDLE ioHandle;
+    size_t fds_before;
+
+    given_candidates(1, families, outcomes);
+    use_virtual_clock(1000LL * 1000000LL, 2);
+    ioHandle = create_socket_io(HOSTNAME_ARG, 1);
+    fds_before = open_fd_count();
+
+    ASSERT_ARE_EQUAL(int, 0, socketio_open(ioHandle, test_on_io_open_complete, NULL, test_on_bytes_received, NULL, test_on_io_error, NULL));
+
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_poll_count);
+    ASSERT_ARE_EQUAL(size_t, (size_t)1, g_open_complete_count);
+    ASSERT_ARE_EQUAL(int, IO_OPEN_ERROR, g_open_result.result);
+    ASSERT_ARE_EQUAL(int, EINVAL, g_open_result.code);
+    ASSERT_ARE_EQUAL(size_t, fds_before, open_fd_count());
+
+    socketio_destroy(ioHandle);
 }
 
 /* poll() failing outright (not a timeout, not EINTR) fails that candidate with
