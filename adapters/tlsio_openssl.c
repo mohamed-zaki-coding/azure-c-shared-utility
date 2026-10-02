@@ -2508,6 +2508,11 @@ CONCRETE_IO_HANDLE tlsio_openssl_create(void* io_create_parameters)
         result = NULL;
         LogError("NULL tls_io_config.");
     }
+    else if (tls_io_config->hostname == NULL)
+    {
+        result = NULL;
+        LogError("NULL tls_io_config->hostname.");
+    }
     else
     {
         result = malloc(sizeof(TLS_IO_INSTANCE));

@@ -44,6 +44,7 @@ endif()
 #however, because of the setup involved, they are restricted to Linux
 if(${use_openssl})
 add_subdirectory(x509_openssl_ut)
+add_subdirectory(tlsio_openssl_ut)
 endif()
 
 add_subdirectory(string_tokenizer_ut)
