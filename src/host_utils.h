@@ -10,6 +10,9 @@
 extern "C" {
 #endif
 
+// Returns the length of an IPv6 host without its local zone; other hosts keep their length.
+size_t host_without_ipv6_scope_length(const char* host, size_t host_length);
+
 /*
 A host is carried internally in its unbracketed form, with a raw "%" separating
 an IPv6 address from an optional zone ID, for example "fe80::1%eth0". A URI or

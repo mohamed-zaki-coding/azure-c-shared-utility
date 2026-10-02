@@ -28,6 +28,7 @@
 #include "azure_c_shared_utility/shared_util_options.h"
 #include "azure_c_shared_utility/gballoc.h"
 #include "azure_c_shared_utility/safe_math.h"
+#include "host_utils.h"
 
 #define TLSIO_STATE_VALUES                        \
     TLSIO_STATE_NOT_OPEN,                         \
@@ -1036,11 +1037,8 @@ CONCRETE_IO_HANDLE tlsio_schannel_create(void* io_create_parameters)
         {
             (void)memset(result, 0, sizeof(TLS_IO_INSTANCE));
 
-            const char* scope = strchr(tls_io_config->hostname, '%');
-            const size_t host_name_length =
-                (scope != NULL && memchr(tls_io_config->hostname, ':', (size_t)(scope - tls_io_config->hostname)) != NULL)
-                ? (size_t)(scope - tls_io_config->hostname)
-                : strlen(tls_io_config->hostname);
+            const size_t host_name_length = host_without_ipv6_scope_length(
+                tls_io_config->hostname, strlen(tls_io_config->hostname));
             size_t malloc_size = safe_add_size_t(host_name_length, 1);
             malloc_size = safe_multiply_size_t(malloc_size, sizeof(SEC_TCHAR));
             if (malloc_size == SIZE_MAX ||

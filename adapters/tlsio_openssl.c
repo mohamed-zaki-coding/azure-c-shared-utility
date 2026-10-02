@@ -28,6 +28,7 @@
 #include "azure_c_shared_utility/const_defines.h"
 #include "azure_c_shared_utility/platform.h" // for http proxy settings
 #include "azure_c_shared_utility/safe_math.h"
+#include "host_utils.h"
 
 
 typedef enum TLSIO_STATE_TAG
@@ -94,11 +95,7 @@ static bool is_ip_literal(const char* hostname)
 static int copy_host_without_scope(char** destination, const char* hostname)
 {
     int result;
-    const char* scope = strchr(hostname, '%');
-    const size_t hostname_length =
-        (scope != NULL && memchr(hostname, ':', (size_t)(scope - hostname)) != NULL)
-        ? (size_t)(scope - hostname)
-        : strlen(hostname);
+    const size_t hostname_length = host_without_ipv6_scope_length(hostname, strlen(hostname));
     const size_t allocation_size = safe_add_size_t(hostname_length, 1);
 
     if (allocation_size == SIZE_MAX ||

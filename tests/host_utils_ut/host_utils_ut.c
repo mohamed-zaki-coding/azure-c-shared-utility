@@ -2,6 +2,7 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 #include <stddef.h>
+#include <string.h>
 
 #include "testrunnerswitcher.h"
 #include "../../src/host_utils.h"
@@ -81,6 +82,36 @@ TEST_FUNCTION(an_already_bracketed_scoped_host_still_loses_its_zone)
 TEST_FUNCTION(an_empty_host_stays_empty)
 {
     ASSERT_FORMATS_TO("", "");
+}
+
+TEST_FUNCTION(a_scoped_ipv6_host_excludes_its_zone_from_peer_identity)
+{
+    const char* host = "fe80::1%Ethernet 2";
+    ASSERT_EQUAL(size_t, sizeof("fe80::1") - 1, host_without_ipv6_scope_length(host, strlen(host)));
+}
+
+TEST_FUNCTION(a_percent_in_a_dns_host_remains_part_of_peer_identity)
+{
+    const char* host = "weird%name.example.com";
+    ASSERT_EQUAL(size_t, strlen(host), host_without_ipv6_scope_length(host, strlen(host)));
+}
+
+TEST_FUNCTION(a_colon_after_a_percent_does_not_make_a_scope)
+{
+    const char* host = "weird%name:example";
+    ASSERT_EQUAL(size_t, strlen(host), host_without_ipv6_scope_length(host, strlen(host)));
+}
+
+TEST_FUNCTION(an_unscoped_ipv6_host_remains_the_peer_identity)
+{
+    const char* host = "2001:db8::1";
+    ASSERT_EQUAL(size_t, strlen(host), host_without_ipv6_scope_length(host, strlen(host)));
+}
+
+TEST_FUNCTION(a_bracketed_ipv6_host_excludes_its_zone_without_its_brackets)
+{
+    const char* host = "[fe80::1%eth0]";
+    ASSERT_EQUAL(size_t, sizeof("fe80::1") - 1, host_without_ipv6_scope_length(host + 1, strlen(host) - 2));
 }
 
 TEST_FUNCTION(format_host_for_authority_with_exact_size_buffer_succeeds)

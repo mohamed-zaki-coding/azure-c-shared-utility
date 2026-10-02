@@ -14,6 +14,14 @@ typedef struct AUTHORITY_HOST_INFO_TAG
     int is_ipv6;
 } AUTHORITY_HOST_INFO;
 
+size_t host_without_ipv6_scope_length(const char* host, size_t host_length)
+{
+    const char* scope = memchr(host, '%', host_length);
+    return (scope != NULL && memchr(host, ':', (size_t)(scope - host)) != NULL)
+        ? (size_t)(scope - host)
+        : host_length;
+}
+
 static int get_authority_host_info(const char* host, AUTHORITY_HOST_INFO* info)
 {
     int result;
@@ -49,14 +57,7 @@ static int get_authority_host_info(const char* host, AUTHORITY_HOST_INFO* info)
         if (is_ipv6 != 0)
         {
             // RFC 6874 section 4: the zone ID is local to this host, so drop it.
-            for (i = 0; i < address_length; i++)
-            {
-                if (address[i] == '%')
-                {
-                    address_length = i;
-                    break;
-                }
-            }
+            address_length = host_without_ipv6_scope_length(address, address_length);
         }
 
         info->address = address;
