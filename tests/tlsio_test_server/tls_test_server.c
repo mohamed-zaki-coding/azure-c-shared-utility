@@ -12,10 +12,13 @@
 #endif
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include <openssl/ssl.h>
 #include <openssl/pem.h>
+#include <openssl/rand.h>
 #include <openssl/rsa.h>
 #include <openssl/x509v3.h>
 
@@ -42,10 +45,16 @@ struct TLS_TEST_CA_TAG
 struct TLS_TEST_SERVER_TAG
 {
     TEST_SOCKET listener;
+    TEST_SOCKET crl_listener;
     SSL_CTX* context;
     THREAD_HANDLE thread;
+    THREAD_HANDLE crl_thread;
+    unsigned char* crl_der;
+    int crl_length;
+    int crl_port;
     int port;
     int accepted;
+    int crl_served;
 #ifdef _WIN32
     int winsock_started;
 #endif
@@ -86,7 +95,7 @@ static int add_extension(X509* certificate, X509* issuer, int nid, const char* v
 }
 
 static X509* generate_certificate(EVP_PKEY* key, X509* issuer, EVP_PKEY* issuer_key,
-    const char* san, long serial)
+    const char* san, const char* crl_url, const char* subject_name, long serial)
 {
     X509* certificate = X509_new();
     X509_NAME* subject;
@@ -102,14 +111,15 @@ static X509* generate_certificate(EVP_PKEY* key, X509* issuer, EVP_PKEY* issuer_
     }
     subject = X509_get_subject_name(certificate);
     if (X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
-        (const unsigned char*)(is_ca ? "isolated test CA" : "test server"), -1, -1, 0) != 1 ||
+        (const unsigned char*)(is_ca ? subject_name : "test server"), -1, -1, 0) != 1 ||
         X509_set_issuer_name(certificate, is_ca ? subject : X509_get_subject_name(issuer)) != 1 ||
         !add_extension(certificate, is_ca ? certificate : issuer, NID_basic_constraints,
             is_ca ? "critical,CA:TRUE" : "critical,CA:FALSE") ||
         !add_extension(certificate, is_ca ? certificate : issuer, NID_key_usage,
             is_ca ? "critical,keyCertSign,cRLSign" : "critical,digitalSignature,keyEncipherment") ||
         (!is_ca && (!add_extension(certificate, issuer, NID_ext_key_usage, "serverAuth") ||
-                    !add_extension(certificate, issuer, NID_subject_alt_name, san))) ||
+                    !add_extension(certificate, issuer, NID_subject_alt_name, san) ||
+                    !add_extension(certificate, issuer, NID_crl_distribution_points, crl_url))) ||
         X509_sign(certificate, is_ca ? key : issuer_key, EVP_sha256()) <= 0)
     {
         goto error;
@@ -124,10 +134,15 @@ error:
 TLS_TEST_CA* tls_test_ca_create(void)
 {
     TLS_TEST_CA* ca = (TLS_TEST_CA*)calloc(1, sizeof(*ca));
+    unsigned char id[8];
+    char subject_name[40];
     if (ca != NULL)
     {
         ca->key = generate_key();
-        if (ca->key == NULL || (ca->certificate = generate_certificate(ca->key, NULL, NULL, NULL, 1)) == NULL)
+        if (ca->key == NULL || RAND_bytes(id, sizeof(id)) != 1 ||
+            snprintf(subject_name, sizeof(subject_name), "isolated CA %02x%02x%02x%02x%02x%02x%02x%02x",
+                id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7]) <= 0 ||
+            (ca->certificate = generate_certificate(ca->key, NULL, NULL, NULL, NULL, subject_name, 1)) == NULL)
         {
             tls_test_ca_destroy(ca);
             ca = NULL;
@@ -218,6 +233,97 @@ static int has_valid_ca_chain(X509* certificate, const TLS_TEST_CA* ca)
     return result;
 }
 
+static int make_crl(TLS_TEST_SERVER* server, const TLS_TEST_CA* ca)
+{
+    X509_CRL* crl = X509_CRL_new();
+    ASN1_TIME* last_update = ASN1_TIME_set(NULL, time(NULL) - 60);
+    ASN1_TIME* next_update = ASN1_TIME_set(NULL, time(NULL) + 3600);
+    unsigned char* cursor;
+    int result = 0;
+
+    if (crl != NULL && last_update != NULL && next_update != NULL &&
+        X509_CRL_set_version(crl, 1) == 1 &&
+        X509_CRL_set_issuer_name(crl, X509_get_subject_name(ca->certificate)) == 1 &&
+        X509_CRL_set1_lastUpdate(crl, last_update) == 1 &&
+        X509_CRL_set1_nextUpdate(crl, next_update) == 1 &&
+        X509_CRL_sign(crl, ca->key, EVP_sha256()) > 0 &&
+        (server->crl_length = i2d_X509_CRL(crl, NULL)) > 0 &&
+        (server->crl_der = (unsigned char*)malloc((size_t)server->crl_length)) != NULL)
+    {
+        cursor = server->crl_der;
+        result = i2d_X509_CRL(crl, &cursor) == server->crl_length;
+    }
+    ASN1_TIME_free(next_update);
+    ASN1_TIME_free(last_update);
+    X509_CRL_free(crl);
+    return result;
+}
+
+static int send_all(TEST_SOCKET connection, const unsigned char* bytes, size_t length)
+{
+    while (length > 0)
+    {
+        int sent = send(connection, (const char*)bytes, (int)length, 0);
+        if (sent <= 0)
+        {
+            return 0;
+        }
+        bytes += sent;
+        length -= (size_t)sent;
+    }
+    return 1;
+}
+
+static int crl_thread(void* context)
+{
+    TLS_TEST_SERVER* server = (TLS_TEST_SERVER*)context;
+    struct timeval timeout = { 5, 0 };
+    fd_set readable;
+    TEST_SOCKET connection = INVALID_TEST_SOCKET;
+    char request[9];
+    char response[160];
+    int response_size;
+    int received = 0;
+
+    FD_ZERO(&readable);
+    FD_SET(server->crl_listener, &readable);
+    if (select((int)server->crl_listener + 1, &readable, NULL, NULL, &timeout) == 1)
+    {
+        connection = accept(server->crl_listener, NULL, NULL);
+        if (connection != INVALID_TEST_SOCKET)
+        {
+#ifdef _WIN32
+            DWORD milliseconds = 5000;
+            (void)setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO, (const char*)&milliseconds, sizeof(milliseconds));
+#else
+            (void)setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+#endif
+            while (received < (int)sizeof(request))
+            {
+                int chunk = recv(connection, request + received, (int)sizeof(request) - received, 0);
+                if (chunk <= 0)
+                {
+                    break;
+                }
+                received += chunk;
+            }
+            if (received == (int)sizeof(request) &&
+                memcmp(request, "GET /crl ", sizeof(request)) == 0 &&
+                (response_size = snprintf(response, sizeof(response),
+                    "HTTP/1.0 200 OK\r\nContent-Type: application/pkix-crl\r\nContent-Length: %d\r\n\r\n",
+                    server->crl_length)) > 0 &&
+                (size_t)response_size < sizeof(response))
+            {
+                server->crl_served =
+                    send_all(connection, (const unsigned char*)response, (size_t)response_size) &&
+                    send_all(connection, server->crl_der, (size_t)server->crl_length);
+            }
+            (void)close_test_socket(connection);
+        }
+    }
+    return 0;
+}
+
 static int server_thread(void* context)
 {
     TLS_TEST_SERVER* server = (TLS_TEST_SERVER*)context;
@@ -263,11 +369,15 @@ TLS_TEST_SERVER* tls_test_server_start(TLS_TEST_CA* ca, const char* san)
     EVP_PKEY* server_key = NULL;
     X509* leaf = NULL;
     struct sockaddr_in6 address;
+    struct sockaddr_in crl_address;
+    char crl_url[96];
 #ifdef _WIN32
     int address_size = sizeof(address);
+    int crl_address_size = sizeof(crl_address);
     WSADATA winsock;
 #else
     socklen_t address_size = sizeof(address);
+    socklen_t crl_address_size = sizeof(crl_address);
 #endif
     int ipv6_only = 1;
 
@@ -276,6 +386,7 @@ TLS_TEST_SERVER* tls_test_server_start(TLS_TEST_CA* ca, const char* san)
         return NULL;
     }
     server->listener = INVALID_TEST_SOCKET;
+    server->crl_listener = INVALID_TEST_SOCKET;
 #ifdef _WIN32
     if (WSAStartup(MAKEWORD(2, 2), &winsock) != 0)
     {
@@ -283,9 +394,30 @@ TLS_TEST_SERVER* tls_test_server_start(TLS_TEST_CA* ca, const char* san)
     }
     server->winsock_started = 1;
 #endif
+    if (!make_crl(server, ca))
+    {
+        goto error;
+    }
+    server->crl_listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (server->crl_listener == INVALID_TEST_SOCKET)
+    {
+        goto error;
+    }
+    memset(&crl_address, 0, sizeof(crl_address));
+    crl_address.sin_family = AF_INET;
+    crl_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(server->crl_listener, (const struct sockaddr*)&crl_address, sizeof(crl_address)) != 0 ||
+        getsockname(server->crl_listener, (struct sockaddr*)&crl_address, &crl_address_size) != 0 ||
+        listen(server->crl_listener, 1) != 0 ||
+        snprintf(crl_url, sizeof(crl_url), "URI:http://127.0.0.1:%u/crl",
+            (unsigned int)ntohs(crl_address.sin_port)) <= 0)
+    {
+        goto error;
+    }
+    server->crl_port = ntohs(crl_address.sin_port);
     server_key = generate_key();
     if (server_key == NULL ||
-        (leaf = generate_certificate(server_key, ca->certificate, ca->key, san, ca->next_serial++)) == NULL ||
+        (leaf = generate_certificate(server_key, ca->certificate, ca->key, san, crl_url, NULL, ca->next_serial++)) == NULL ||
         !has_valid_ca_chain(leaf, ca))
     {
         goto error;
@@ -319,6 +451,10 @@ TLS_TEST_SERVER* tls_test_server_start(TLS_TEST_CA* ca, const char* san)
         goto error;
     }
     server->port = ntohs(address.sin6_port);
+    if (ThreadAPI_Create(&server->crl_thread, crl_thread, server) != THREADAPI_OK)
+    {
+        goto error;
+    }
     if (ThreadAPI_Create(&server->thread, server_thread, server) != THREADAPI_OK)
     {
         goto error;
@@ -330,7 +466,7 @@ TLS_TEST_SERVER* tls_test_server_start(TLS_TEST_CA* ca, const char* san)
 error:
     X509_free(leaf);
     EVP_PKEY_free(server_key);
-    (void)tls_test_server_stop(server);
+    (void)tls_test_server_stop(server, NULL);
     return NULL;
 }
 
@@ -339,7 +475,7 @@ int tls_test_server_port(const TLS_TEST_SERVER* server)
     return server == NULL ? 0 : server->port;
 }
 
-int tls_test_server_stop(TLS_TEST_SERVER* server)
+int tls_test_server_stop(TLS_TEST_SERVER* server, int* crl_served)
 {
     int accepted = 0;
     if (server == NULL)
@@ -354,11 +490,41 @@ int tls_test_server_stop(TLS_TEST_SERVER* server)
         }
         accepted = server->accepted;
     }
+    if (server->crl_thread != NULL)
+    {
+        struct sockaddr_in address;
+        TEST_SOCKET wake = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (wake != INVALID_TEST_SOCKET)
+        {
+            memset(&address, 0, sizeof(address));
+            address.sin_family = AF_INET;
+            address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            address.sin_port = htons((unsigned short)server->crl_port);
+            if (connect(wake, (const struct sockaddr*)&address, sizeof(address)) == 0)
+            {
+                (void)send(wake, "!", 1, 0);
+            }
+            (void)close_test_socket(wake);
+        }
+        if (ThreadAPI_Join(server->crl_thread, NULL) != THREADAPI_OK)
+        {
+            return -1;
+        }
+    }
+    if (crl_served != NULL)
+    {
+        *crl_served = server->crl_served;
+    }
     if (server->listener != INVALID_TEST_SOCKET)
     {
         (void)close_test_socket(server->listener);
     }
+    if (server->crl_listener != INVALID_TEST_SOCKET)
+    {
+        (void)close_test_socket(server->crl_listener);
+    }
     SSL_CTX_free(server->context);
+    free(server->crl_der);
 #ifdef _WIN32
     if (server->winsock_started)
     {

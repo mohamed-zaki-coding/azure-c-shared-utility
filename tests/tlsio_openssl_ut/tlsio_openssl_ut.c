@@ -51,13 +51,13 @@ static int run_handshake(const char* hostname, const char* server_san,
 {
     int ok = 0;
     int accepted;
+    int crl_served = 0;
     char* trusted_ca_pem = tls_test_ca_pem(trusted_ca);
     TLS_TEST_SERVER* server = NULL;
     CONCRETE_IO_HANDLE io = NULL;
     TLSIO_CONFIG config = { 0 };
     OPEN_RESULT outcome;
     const bool isolate_trust = true;
-    const bool disable_crl_check = true;
 
     if (trusted_ca_pem == NULL ||
         (server = tls_test_server_start(test_ca, server_san)) == NULL)
@@ -70,8 +70,6 @@ static int run_handshake(const char* hostname, const char* server_san,
     io = tlsio_openssl_create(&config);
     if (io == NULL ||
         tlsio_openssl_setoption(io, OPTION_DISABLE_DEFAULT_VERIFY_PATHS, &isolate_trust) != 0 ||
-        // These ephemeral certificates have no CRL; this does not disable peer or IP SAN verification.
-        tlsio_openssl_setoption(io, OPTION_DISABLE_CRL_CHECK, &disable_crl_check) != 0 ||
         tlsio_openssl_setoption(io, OPTION_TRUSTED_CERT, trusted_ca_pem) != 0)
     {
         goto cleanup;
@@ -83,9 +81,9 @@ cleanup:
     {
         tlsio_openssl_destroy(io);
     }
-    accepted = server == NULL ? 0 : tls_test_server_stop(server);
+    accepted = server == NULL ? 0 : tls_test_server_stop(server, &crl_served);
     free(trusted_ca_pem);
-    return ok && accepted == 1;
+    return ok && accepted == 1 && (expected != IO_OPEN_OK || crl_served);
 }
 
 BEGIN_TEST_SUITE(tlsio_openssl_ut)

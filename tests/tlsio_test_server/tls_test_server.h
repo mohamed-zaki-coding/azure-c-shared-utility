@@ -20,15 +20,16 @@ void tls_test_ca_destroy(TLS_TEST_CA* ca);
 char* tls_test_ca_pem(const TLS_TEST_CA* ca);
 unsigned char* tls_test_ca_der(const TLS_TEST_CA* ca, int* length);
 
-// Binds ::1 on an ephemeral port and accepts one TLS connection. The SAN is
-// an OpenSSL X509V3 value such as "IP:::1" or "IP:::2".
+// Binds ::1 for one TLS connection and serves a CA-signed, empty CRL from
+// memory via a separate ephemeral 127.0.0.1 HTTP endpoint. The SAN is an
+// OpenSSL X509V3 value such as "IP:::1" or "IP:::2".
 TLS_TEST_SERVER* tls_test_server_start(TLS_TEST_CA* ca, const char* san);
 int tls_test_server_port(const TLS_TEST_SERVER* server);
 
-// Joins the server thread and returns 1 if it accepted a connection, 0 if
-// none arrived, or -1 if the thread could not be joined. Frees the server
-// after a successful join; a failed join must not free a live thread's state.
-int tls_test_server_stop(TLS_TEST_SERVER* server);
+// Joins both threads and reports whether the CRL was served from memory.
+// Returns 1 if TLS was accepted, 0 if none arrived, or -1 on join failure.
+// Frees the server after successful joins; a failed join cannot free live state.
+int tls_test_server_stop(TLS_TEST_SERVER* server, int* crl_served);
 
 #ifdef __cplusplus
 }
