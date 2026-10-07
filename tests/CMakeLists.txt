@@ -47,6 +47,14 @@ add_subdirectory(x509_openssl_ut)
 add_subdirectory(tlsio_openssl_ut)
 endif()
 
+if(WIN32 AND use_schannel AND use_openssl)
+    option(run_isolated_schannel_ipv6_tests
+        "Run Schannel IPv6 certificate tests only on a disposable Windows test user/runner" OFF)
+    if(run_isolated_schannel_ipv6_tests)
+        add_subdirectory(tlsio_schannel_ipv6_ut)
+    endif()
+endif()
+
 add_subdirectory(string_tokenizer_ut)
 add_subdirectory(strings_ut)
 add_subdirectory(tickcounter_ut)
