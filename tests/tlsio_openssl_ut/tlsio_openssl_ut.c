@@ -46,11 +46,12 @@ static int handshake_result(CONCRETE_IO_HANDLE io, OPEN_RESULT* state)
     return state->completed;
 }
 
-static int run_handshake(const char* hostname, const char* server_san, IO_OPEN_RESULT expected)
+static int run_handshake(const char* hostname, const char* server_san,
+    TLS_TEST_CA* trusted_ca, IO_OPEN_RESULT expected)
 {
     int ok = 0;
     int accepted;
-    char* trusted_ca = tls_test_ca_pem(test_ca);
+    char* trusted_ca_pem = tls_test_ca_pem(trusted_ca);
     TLS_TEST_SERVER* server = NULL;
     CONCRETE_IO_HANDLE io = NULL;
     TLSIO_CONFIG config = { 0 };
@@ -58,7 +59,7 @@ static int run_handshake(const char* hostname, const char* server_san, IO_OPEN_R
     const bool isolate_trust = true;
     const bool disable_crl_check = true;
 
-    if (trusted_ca == NULL ||
+    if (trusted_ca_pem == NULL ||
         (server = tls_test_server_start(test_ca, server_san)) == NULL)
     {
         goto cleanup;
@@ -71,7 +72,7 @@ static int run_handshake(const char* hostname, const char* server_san, IO_OPEN_R
         tlsio_openssl_setoption(io, OPTION_DISABLE_DEFAULT_VERIFY_PATHS, &isolate_trust) != 0 ||
         // These ephemeral certificates have no CRL; this does not disable peer or IP SAN verification.
         tlsio_openssl_setoption(io, OPTION_DISABLE_CRL_CHECK, &disable_crl_check) != 0 ||
-        tlsio_openssl_setoption(io, OPTION_TRUSTED_CERT, trusted_ca) != 0)
+        tlsio_openssl_setoption(io, OPTION_TRUSTED_CERT, trusted_ca_pem) != 0)
     {
         goto cleanup;
     }
@@ -83,7 +84,7 @@ cleanup:
         tlsio_openssl_destroy(io);
     }
     accepted = server == NULL ? 0 : tls_test_server_stop(server);
-    free(trusted_ca);
+    free(trusted_ca_pem);
     return ok && accepted == 1;
 }
 
@@ -130,17 +131,27 @@ TEST_FUNCTION(runtime_ca_der_and_pem_represent_the_same_public_certificate)
 
 TEST_FUNCTION(trusted_ca_and_matching_ipv6_ip_san_complete_handshake)
 {
-    ASSERT_IS_TRUE(run_handshake("::1", "IP:::1", IO_OPEN_OK));
+    ASSERT_IS_TRUE(run_handshake("::1", "IP:::1", test_ca, IO_OPEN_OK));
 }
 
 TEST_FUNCTION(trusted_ca_and_wrong_ipv6_ip_san_reject_handshake)
 {
-    ASSERT_IS_TRUE(run_handshake("::1", "IP:::2", IO_OPEN_ERROR));
+    ASSERT_IS_TRUE(run_handshake("::1", "IP:::2", test_ca, IO_OPEN_ERROR));
+}
+
+TEST_FUNCTION(matching_ipv6_ip_san_from_untrusted_ca_rejects_handshake)
+{
+    TLS_TEST_CA* unrelated_ca = tls_test_ca_create();
+    int rejected = unrelated_ca != NULL &&
+        run_handshake("::1", "IP:::1", unrelated_ca, IO_OPEN_ERROR);
+
+    tls_test_ca_destroy(unrelated_ca);
+    ASSERT_IS_TRUE(rejected);
 }
 
 TEST_FUNCTION(scoped_ipv6_loopback_matches_unscoped_ip_san)
 {
-    ASSERT_IS_TRUE(run_handshake("::1%1", "IP:::1", IO_OPEN_OK));
+    ASSERT_IS_TRUE(run_handshake("::1%1", "IP:::1", test_ca, IO_OPEN_OK));
 }
 
 END_TEST_SUITE(tlsio_openssl_ut)
