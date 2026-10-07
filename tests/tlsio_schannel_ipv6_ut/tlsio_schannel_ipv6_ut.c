@@ -113,7 +113,7 @@ static int run_handshake(TLS_TEST_CA* issuing_ca, const char* hostname, const ch
     {
         tlsio_schannel_destroy(io);
     }
-    accepted = tls_test_server_stop(server);
+    accepted = tls_test_server_stop(server, NULL);
     return opened && accepted == 1;
 }
 
