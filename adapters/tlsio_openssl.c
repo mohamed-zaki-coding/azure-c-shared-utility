@@ -85,8 +85,8 @@ typedef struct TLS_IO_INSTANCE_TAG
 
 static bool is_ip_literal(const char* hostname)
 {
-    // A colon cannot appear in a DNS name, so it marks an IPv6 literal. A DNS
-    // name always has a non-numeric label, so digits and dots mark an IPv4 one.
+    // A colon marks an IPv6 candidate. Treat dotted numeric hosts as IPv4
+    // candidates so malformed addresses fail closed during IP verification.
     return strchr(hostname, ':') != NULL ||
         (strchr(hostname, '.') != NULL &&
          hostname[strspn(hostname, "0123456789.")] == '\0');

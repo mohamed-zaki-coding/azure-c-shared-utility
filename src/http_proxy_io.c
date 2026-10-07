@@ -438,8 +438,7 @@ static void on_underlying_io_open_complete(void* context, IO_OPEN_RESULT_DETAILE
                     char port_string[(sizeof(int) * CHAR_BIT) + 2];
                     int port_string_length;
                     size_t port_length;
-                    size_t request_target_host_length;
-                    size_t host_header_host_length;
+                    size_t formatted_host_length;
                     size_t connect_request_length;
                     size_t connect_request_size;
                     size_t connect_request_offset;
@@ -464,14 +463,13 @@ static void on_underlying_io_open_complete(void* context, IO_OPEN_RESULT_DETAILE
                     else
                     {
                         port_length = (size_t)port_string_length;
-                        request_target_host_length = authority_host_length(http_proxy_io_instance->hostname);
-                        host_header_host_length = authority_host_length(http_proxy_io_instance->hostname);
+                        formatted_host_length = authority_host_length(http_proxy_io_instance->hostname);
                         connect_request_length = sizeof(connect_request_prefix) - 1;
-                        connect_request_length = safe_add_size_t(connect_request_length, request_target_host_length);
+                        connect_request_length = safe_add_size_t(connect_request_length, formatted_host_length);
                         connect_request_length = safe_add_size_t(connect_request_length, sizeof(connect_request_between_authority_and_port) - 1);
                         connect_request_length = safe_add_size_t(connect_request_length, port_length);
                         connect_request_length = safe_add_size_t(connect_request_length, sizeof(connect_request_between_authorities) - 1);
-                        connect_request_length = safe_add_size_t(connect_request_length, host_header_host_length);
+                        connect_request_length = safe_add_size_t(connect_request_length, formatted_host_length);
                         connect_request_length = safe_add_size_t(connect_request_length, sizeof(connect_request_between_authority_and_port) - 1);
                         connect_request_length = safe_add_size_t(connect_request_length, port_length);
                         if (http_proxy_io_instance->username != NULL)
@@ -504,11 +502,11 @@ static void on_underlying_io_open_complete(void* context, IO_OPEN_RESULT_DETAILE
                                 /* Codes_SRS_HTTP_PROXY_IO_01_059: [ - If `username` and `password` have been specified in the arguments passed to `http_proxy_io_create`, then the header `Proxy-Authorization` shall be added to the request. ]*/
                                 connect_request_offset = 0;
                                 if ((append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, connect_request_prefix) != 0) ||
-                                    (append_formatted_host_for_authority(connect_request, connect_request_size, &connect_request_offset, http_proxy_io_instance->hostname, request_target_host_length) != 0) ||
+                                    (append_formatted_host_for_authority(connect_request, connect_request_size, &connect_request_offset, http_proxy_io_instance->hostname, formatted_host_length) != 0) ||
                                     (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, connect_request_between_authority_and_port) != 0) ||
                                     (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, port_string) != 0) ||
                                     (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, connect_request_between_authorities) != 0) ||
-                                    (append_formatted_host_for_authority(connect_request, connect_request_size, &connect_request_offset, http_proxy_io_instance->hostname, host_header_host_length) != 0) ||
+                                    (append_formatted_host_for_authority(connect_request, connect_request_size, &connect_request_offset, http_proxy_io_instance->hostname, formatted_host_length) != 0) ||
                                     (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, connect_request_between_authority_and_port) != 0) ||
                                     (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, port_string) != 0) ||
                                     ((http_proxy_io_instance->username != NULL) &&
